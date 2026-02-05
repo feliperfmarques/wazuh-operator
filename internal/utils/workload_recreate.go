@@ -18,11 +18,14 @@ package utils //nolint:revive // utils is a common package name
 
 import (
 	"context"
+	"fmt"
 	"strings"
+	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/tools/record"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
@@ -34,8 +37,13 @@ func IsStatefulSetImmutableError(err error) bool {
 	}
 	if apierrors.IsInvalid(err) || apierrors.IsForbidden(err) {
 		msg := err.Error()
+		if strings.Contains(msg, "spec.selector") {
+			return false
+		}
 		return strings.Contains(msg, "updates to statefulset spec") ||
-			strings.Contains(msg, "immutable")
+			strings.Contains(msg, "volumeClaimTemplates") ||
+			strings.Contains(msg, "serviceName") ||
+			strings.Contains(msg, "podManagementPolicy")
 	}
 	return false
 }
@@ -47,25 +55,39 @@ func IsDeploymentImmutableError(err error) bool {
 	}
 	if apierrors.IsInvalid(err) || apierrors.IsForbidden(err) {
 		msg := err.Error()
-		return strings.Contains(msg, "field is immutable") ||
-			strings.Contains(msg, "immutable")
+		if strings.Contains(msg, "spec.selector") {
+			return false
+		}
+		return strings.Contains(msg, "spec.strategy") ||
+			strings.Contains(msg, "spec.minReadySeconds") ||
+			strings.Contains(msg, "spec.revisionHistoryLimit")
 	}
 	return false
 }
 
 // RecreateStatefulSetOnError deletes and recreates a StatefulSet if the error is immutable-field related.
 // Returns (true, nil) when a recreate is performed successfully.
-func RecreateStatefulSetOnError(ctx context.Context, c client.Client, desired *appsv1.StatefulSet, existing *appsv1.StatefulSet, err error) (bool, error) {
+func RecreateStatefulSetOnError(ctx context.Context, c client.Client, recorder record.EventRecorder, desired *appsv1.StatefulSet, existing *appsv1.StatefulSet, err error) (bool, error) {
 	if !IsStatefulSetImmutableError(err) {
 		return false, err
 	}
 
 	logger := log.FromContext(ctx)
 	logger.Info("Recreating StatefulSet due to immutable field update error", "name", desired.Name, "namespace", desired.Namespace)
+	if recorder != nil {
+		recorder.Eventf(desired, "Normal", "WorkloadRecreated", "Recreating StatefulSet due to immutable spec update")
+	}
 
-	propagation := metav1.DeletePropagationBackground
+	propagation := metav1.DeletePropagationForeground
 	if delErr := c.Delete(ctx, existing, &client.DeleteOptions{PropagationPolicy: &propagation}); delErr != nil && !apierrors.IsNotFound(delErr) {
 		return true, delErr
+	}
+
+	if existing.GetDeletionTimestamp() != nil {
+		return true, fmt.Errorf("statefulset %s/%s deletion in progress", existing.GetNamespace(), existing.GetName())
+	}
+	if err := waitForDeletion(ctx, c, existing.GetName(), existing.GetNamespace(), &appsv1.StatefulSet{}, 60*time.Second); err != nil {
+		return true, err
 	}
 
 	desired.SetResourceVersion("")
@@ -77,17 +99,27 @@ func RecreateStatefulSetOnError(ctx context.Context, c client.Client, desired *a
 
 // RecreateDeploymentOnError deletes and recreates a Deployment if the error is immutable-field related.
 // Returns (true, nil) when a recreate is performed successfully.
-func RecreateDeploymentOnError(ctx context.Context, c client.Client, desired *appsv1.Deployment, existing *appsv1.Deployment, err error) (bool, error) {
+func RecreateDeploymentOnError(ctx context.Context, c client.Client, recorder record.EventRecorder, desired *appsv1.Deployment, existing *appsv1.Deployment, err error) (bool, error) {
 	if !IsDeploymentImmutableError(err) {
 		return false, err
 	}
 
 	logger := log.FromContext(ctx)
 	logger.Info("Recreating Deployment due to immutable field update error", "name", desired.Name, "namespace", desired.Namespace)
+	if recorder != nil {
+		recorder.Eventf(desired, "Normal", "WorkloadRecreated", "Recreating Deployment due to immutable spec update")
+	}
 
-	propagation := metav1.DeletePropagationBackground
+	propagation := metav1.DeletePropagationForeground
 	if delErr := c.Delete(ctx, existing, &client.DeleteOptions{PropagationPolicy: &propagation}); delErr != nil && !apierrors.IsNotFound(delErr) {
 		return true, delErr
+	}
+
+	if existing.GetDeletionTimestamp() != nil {
+		return true, fmt.Errorf("deployment %s/%s deletion in progress", existing.GetNamespace(), existing.GetName())
+	}
+	if err := waitForDeletion(ctx, c, existing.GetName(), existing.GetNamespace(), &appsv1.Deployment{}, 60*time.Second); err != nil {
+		return true, err
 	}
 
 	desired.SetResourceVersion("")
@@ -95,4 +127,20 @@ func RecreateDeploymentOnError(ctx context.Context, c client.Client, desired *ap
 		return true, createErr
 	}
 	return true, nil
+}
+
+func waitForDeletion(ctx context.Context, c client.Client, name, namespace string, obj client.Object, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	for {
+		if time.Now().After(deadline) {
+			return fmt.Errorf("timeout waiting for deletion of %s/%s", namespace, name)
+		}
+		if err := c.Get(ctx, client.ObjectKey{Namespace: namespace, Name: name}, obj); err != nil {
+			if apierrors.IsNotFound(err) {
+				return nil
+			}
+			return err
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
 }
