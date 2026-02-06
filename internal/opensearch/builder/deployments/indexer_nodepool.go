@@ -666,7 +666,14 @@ ls -la /tmp/config/
 				"sysctl -w vm.max_map_count=262144 || echo 'sysctl failed - vm.max_map_count might need to be set on the host node'",
 			},
 			SecurityContext: &corev1.SecurityContext{
-				Privileged: boolPtr(true),
+				Capabilities: &corev1.Capabilities{
+					Add: []corev1.Capability{
+						"SYS_ADMIN",
+					},
+				},
+				SeccompProfile: &corev1.SeccompProfile{
+					Type: corev1.SeccompProfileTypeUnconfined,
+				},
 			},
 		},
 	}
