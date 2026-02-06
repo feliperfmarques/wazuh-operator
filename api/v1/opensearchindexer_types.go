@@ -30,7 +30,7 @@ type OpenSearchIndexerSpec struct {
 
 	// Reference to a WazuhCluster (optional)
 	// +optional
-	ClusterRef string `json:"clusterRef,omitempty"`
+	ClusterRef *WazuhClusterReference `json:"clusterRef,omitempty"`
 
 	// Number of indexer replicas
 	// +kubebuilder:validation:Minimum=1
@@ -193,6 +193,8 @@ type OpenSearchIndexerStatus struct {
 	Phase ComponentPhase `json:"phase,omitempty"`
 
 	// Conditions represent the latest available observations
+	// +listType=map
+	// +listMapKey=type
 	// +optional
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
 

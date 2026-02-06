@@ -130,6 +130,10 @@ type WazuhManagerClusterSpec struct {
 	// This helps ensure high availability by preventing all managers from running on the same node
 	// +optional
 	AntiAffinity *AntiAffinitySpec `json:"antiAffinity,omitempty"`
+
+	// Network policy for manager pods
+	// +optional
+	NetworkPolicy *NetworkPolicySpec `json:"networkPolicy,omitempty"`
 }
 
 // GetTotalReplicas returns the total number of manager nodes (1 master + N workers)
@@ -257,6 +261,11 @@ type WazuhIndexerClusterSpec struct {
 	// +kubebuilder:pruning:PreserveUnknownFields
 	Affinity *corev1.Affinity `json:"affinity,omitempty"`
 
+	// Topology spread constraints for pod scheduling
+	// +optional
+	// +kubebuilder:pruning:PreserveUnknownFields
+	TopologySpreadConstraints []corev1.TopologySpreadConstraint `json:"topologySpreadConstraints,omitempty"`
+
 	// Pod Disruption Budget
 	// +optional
 	PodDisruptionBudget *PodDisruptionBudgetSpec `json:"podDisruptionBudget,omitempty"`
@@ -327,6 +336,12 @@ type WazuhIndexerClusterSpec struct {
 	// needs shard rebalancing after scaling. Use with caution.
 	// +optional
 	HPA *HPASpec `json:"hpa,omitempty"`
+
+	// Termination grace period in seconds for pods
+	// OpenSearch needs time to flush and transfer shards before shutdown
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	TerminationGracePeriodSeconds *int64 `json:"terminationGracePeriodSeconds,omitempty"`
 }
 
 // WazuhDashboardClusterSpec defines the dashboard configuration (inline in WazuhCluster)
@@ -371,6 +386,11 @@ type WazuhDashboardClusterSpec struct {
 	// +optional
 	// +kubebuilder:pruning:PreserveUnknownFields
 	Affinity *corev1.Affinity `json:"affinity,omitempty"`
+
+	// Topology spread constraints for pod scheduling
+	// +optional
+	// +kubebuilder:pruning:PreserveUnknownFields
+	TopologySpreadConstraints []corev1.TopologySpreadConstraint `json:"topologySpreadConstraints,omitempty"`
 
 	// Pod Disruption Budget
 	// +optional
@@ -420,6 +440,11 @@ type WazuhDashboardClusterSpec struct {
 	// When enabled, the Dashboard will scale based on CPU/memory utilization
 	// +optional
 	HPA *HPASpec `json:"hpa,omitempty"`
+
+	// Termination grace period in seconds for pods
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	TerminationGracePeriodSeconds *int64 `json:"terminationGracePeriodSeconds,omitempty"`
 }
 
 // TLSConfig defines TLS configuration
@@ -804,7 +829,7 @@ type VolumeExpansionStatus struct {
 type ComponentExpansionStatus struct {
 	// Phase indicates the current expansion phase
 	// +kubebuilder:validation:Enum=Pending;InProgress;Completed;Failed
-	Phase string `json:"phase"`
+	Phase ExpansionPhase `json:"phase"`
 
 	// RequestedSize is the new requested storage size
 	// +optional
@@ -838,6 +863,8 @@ type WazuhClusterStatus struct {
 	Phase ClusterPhase `json:"phase,omitempty"`
 
 	// Conditions represent the latest available observations
+	// +listType=map
+	// +listMapKey=type
 	// +optional
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
 
@@ -1024,7 +1051,7 @@ const (
 type ComponentStatus struct {
 	// Phase of the component
 	// +optional
-	Phase string `json:"phase,omitempty"`
+	Phase ComponentStatusPhase `json:"phase,omitempty"`
 
 	// Ready replicas
 	// +optional

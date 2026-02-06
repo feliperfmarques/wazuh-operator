@@ -26,11 +26,13 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	wazuhv1 "github.com/MaximeWewer/wazuh-operator/api/v1"
 	"github.com/MaximeWewer/wazuh-operator/internal/adapters"
 	"github.com/MaximeWewer/wazuh-operator/internal/opensearch/security"
+	"github.com/MaximeWewer/wazuh-operator/pkg/constants"
 )
 
 // UserReconciler handles reconciliation of OpenSearch users
@@ -59,6 +61,19 @@ func (r *UserReconciler) WithClientFactory(factory *security.OpenSearchClientFac
 // Reconcile reconciles an OpenSearch user
 func (r *UserReconciler) Reconcile(ctx context.Context, user *wazuhv1.OpenSearchUser) error {
 	log := logf.FromContext(ctx)
+
+	// Handle finalizer
+	if !controllerutil.ContainsFinalizer(user, constants.UserFinalizer) {
+		controllerutil.AddFinalizer(user, constants.UserFinalizer)
+		if err := r.Update(ctx, user); err != nil {
+			return fmt.Errorf("failed to add finalizer: %w", err)
+		}
+	}
+
+	// Check if being deleted
+	if !user.DeletionTimestamp.IsZero() {
+		return r.handleDeletion(ctx, user)
+	}
 
 	// Get password from secret
 	password, err := r.getPassword(ctx, user)
@@ -91,7 +106,7 @@ func (r *UserReconciler) Reconcile(ctx context.Context, user *wazuhv1.OpenSearch
 	r.recordEvent(user, corev1.EventTypeNormal, "Synced", "User successfully synchronized to OpenSearch")
 
 	// Update status
-	if err := r.updateStatus(ctx, user, "Ready", "User reconciled successfully"); err != nil {
+	if err := r.updateStatus(ctx, user, wazuhv1.OpenSearchResourcePhaseReady, "User reconciled successfully"); err != nil {
 		return fmt.Errorf("failed to update status: %w", err)
 	}
 
@@ -163,13 +178,25 @@ func (r *UserReconciler) getOpenSearchClient(ctx context.Context, user *wazuhv1.
 }
 
 // updateStatus updates the user status
-func (r *UserReconciler) updateStatus(ctx context.Context, user *wazuhv1.OpenSearchUser, phase, message string) error {
+func (r *UserReconciler) updateStatus(ctx context.Context, user *wazuhv1.OpenSearchUser, phase wazuhv1.OpenSearchResourcePhase, message string) error {
 	user.Status.Phase = phase
 	user.Status.Message = message
 	now := metav1.Now()
 	user.Status.LastSyncTime = &now
 
 	return r.Status().Update(ctx, user)
+}
+
+// handleDeletion handles user cleanup on deletion
+func (r *UserReconciler) handleDeletion(ctx context.Context, user *wazuhv1.OpenSearchUser) error {
+	log := logf.FromContext(ctx)
+
+	if err := r.Delete(ctx, user); err != nil {
+		log.Error(err, "Failed to delete user from OpenSearch, proceeding with finalizer removal")
+	}
+
+	controllerutil.RemoveFinalizer(user, constants.UserFinalizer)
+	return r.Update(ctx, user)
 }
 
 // Delete handles cleanup when a user is deleted

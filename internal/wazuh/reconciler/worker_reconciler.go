@@ -19,6 +19,7 @@ package reconciler
 import (
 	"context"
 	"fmt"
+	"reflect"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -200,6 +201,16 @@ func (r *WorkerReconciler) reconcileStandaloneStatefulSet(ctx context.Context, w
 	if len(worker.Spec.ExtraVolumeMounts) > 0 {
 		stsBuilder.WithVolumeMounts(worker.Spec.ExtraVolumeMounts)
 	}
+	if worker.Spec.Tolerations != nil {
+		stsBuilder.WithTolerations(worker.Spec.Tolerations)
+	}
+	if worker.Spec.Affinity != nil {
+		stsBuilder.WithAffinity(worker.Spec.Affinity)
+	}
+
+	// Set termination grace period default
+	terminationGracePeriod := constants.DefaultManagerTerminationGracePeriod
+	stsBuilder.WithTerminationGracePeriodSeconds(&terminationGracePeriod)
 
 	sts := stsBuilder.Build()
 	if err := controllerutil.SetControllerReference(worker, sts, r.Scheme); err != nil {
@@ -231,6 +242,14 @@ func (r *WorkerReconciler) reconcileStandaloneStatefulSet(ctx context.Context, w
 	}
 	if utils.HashMap(sts.Spec.Template.Annotations) != utils.HashMap(found.Spec.Template.Annotations) {
 		log.Info("Updating Worker StatefulSet due to pod annotation change", "name", sts.Name)
+		needsUpdate = true
+	}
+	if !reflect.DeepEqual(sts.Spec.Template.Spec.Tolerations, found.Spec.Template.Spec.Tolerations) {
+		log.Info("Updating Worker StatefulSet due to tolerations change", "name", sts.Name)
+		needsUpdate = true
+	}
+	if !reflect.DeepEqual(sts.Spec.Template.Spec.Affinity, found.Spec.Template.Spec.Affinity) {
+		log.Info("Updating Worker StatefulSet due to affinity change", "name", sts.Name)
 		needsUpdate = true
 	}
 	if needsUpdate {

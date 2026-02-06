@@ -66,8 +66,9 @@ import (
 // IndexerReconciler handles reconciliation of OpenSearch Indexer
 type IndexerReconciler struct {
 	client.Client
-	Scheme   *runtime.Scheme
-	Recorder record.EventRecorder
+	Scheme        *runtime.Scheme
+	Recorder      record.EventRecorder
+	ClientFactory *security.OpenSearchClientFactory
 
 	// drainer handles indexer drain operations for safe scale-down
 	drainer *drain.IndexerDrainerImpl
@@ -81,6 +82,12 @@ func NewIndexerReconciler(c client.Client, scheme *runtime.Scheme) *IndexerRecon
 		Client: c,
 		Scheme: scheme,
 	}
+}
+
+// WithClientFactory sets the shared OpenSearch client factory
+func (r *IndexerReconciler) WithClientFactory(factory *security.OpenSearchClientFactory) *IndexerReconciler {
+	r.ClientFactory = factory
+	return r
 }
 
 // WithRecorder sets the event recorder
@@ -247,7 +254,11 @@ func (r *IndexerReconciler) reconcileSecrets(ctx context.Context, cluster *wazuh
 	if err != nil && errors.IsNotFound(err) {
 		// If no external credentials provided, generate a random password
 		if adminPassword == "" {
-			adminPassword = utils.GenerateRandomPassword(24)
+			var err error
+			adminPassword, err = utils.GenerateRandomPassword(24)
+			if err != nil {
+				return fmt.Errorf("failed to generate admin password: %w", err)
+			}
 		}
 		credsBuilder := secrets.NewIndexerCredentialsSecretBuilder(cluster.Name, cluster.Namespace)
 		credsBuilder.WithAdminCredentials(adminUsername, adminPassword)
@@ -604,6 +615,13 @@ func (r *IndexerReconciler) reconcileStatefulSetWithCertHash(ctx context.Context
 	// Set cluster reference for monitoring (Prometheus plugin and metrics)
 	stsBuilder.WithCluster(cluster)
 
+	// Set termination grace period (default + user override)
+	terminationGracePeriod := constants.DefaultIndexerTerminationGracePeriod
+	if cluster.Spec.Indexer != nil && cluster.Spec.Indexer.TerminationGracePeriodSeconds != nil {
+		terminationGracePeriod = *cluster.Spec.Indexer.TerminationGracePeriodSeconds
+	}
+	stsBuilder.WithTerminationGracePeriodSeconds(&terminationGracePeriod)
+
 	sts := stsBuilder.Build()
 	if err := controllerutil.SetControllerReference(cluster, sts, r.Scheme); err != nil {
 		return fmt.Errorf("failed to set controller reference for indexer statefulset: %w", err)
@@ -679,7 +697,10 @@ func (r *IndexerReconciler) reconcileStatefulSetWithCertHash(ctx context.Context
 	}
 
 	// Check if replicas changed
-	desiredReplicas := cluster.Spec.Indexer.Replicas
+	var desiredReplicas int32
+	if cluster.Spec.Indexer != nil {
+		desiredReplicas = cluster.Spec.Indexer.Replicas
+	}
 	if found.Spec.Replicas != nil && *found.Spec.Replicas != desiredReplicas {
 		log.Info("Updating Indexer StatefulSet due to replica count change",
 			"name", sts.Name,
@@ -814,20 +835,22 @@ func (r *IndexerReconciler) reconcileStatefulSetNonBlocking(ctx context.Context,
 
 	// Extract spec values for hash computation
 	var (
-		replicas       = constants.DefaultIndexerReplicas
-		resources      *corev1.ResourceRequirements
-		storageSize    = constants.DefaultIndexerStorageSize
-		javaOpts       = constants.DefaultIndexerJavaOpts
-		image          string
-		nodeSelector   map[string]string
-		tolerations    []corev1.Toleration
-		affinity       *corev1.Affinity
-		env            []corev1.EnvVar
-		envFrom        []corev1.EnvFromSource
-		annotations    map[string]string
-		podAnnotations map[string]string
+		replicas                  = constants.DefaultIndexerReplicas
+		resources                 *corev1.ResourceRequirements
+		storageSize               = constants.DefaultIndexerStorageSize
+		javaOpts                  = constants.DefaultIndexerJavaOpts
+		image                     string
+		nodeSelector              map[string]string
+		tolerations               []corev1.Toleration
+		affinity                  *corev1.Affinity
+		topologySpreadConstraints []corev1.TopologySpreadConstraint
+		env                       []corev1.EnvVar
+		envFrom                   []corev1.EnvFromSource
+		annotations               map[string]string
+		podAnnotations            map[string]string
 	)
 	version := cluster.Spec.Version
+	imagePullSecrets := cluster.Spec.ImagePullSecrets
 
 	// Check if monitoring is enabled
 	monitoringEnabled := cluster.Spec.Monitoring != nil && cluster.Spec.Monitoring.Enabled
@@ -846,6 +869,7 @@ func (r *IndexerReconciler) reconcileStatefulSetNonBlocking(ctx context.Context,
 		nodeSelector = cluster.Spec.Indexer.NodeSelector
 		tolerations = cluster.Spec.Indexer.Tolerations
 		affinity = cluster.Spec.Indexer.Affinity
+		topologySpreadConstraints = cluster.Spec.Indexer.TopologySpreadConstraints
 		env = cluster.Spec.Indexer.Env
 		envFrom = cluster.Spec.Indexer.EnvFrom
 		annotations = cluster.Spec.Indexer.Annotations
@@ -860,20 +884,22 @@ func (r *IndexerReconciler) reconcileStatefulSetNonBlocking(ctx context.Context,
 
 	// Compute spec hash for change detection (includes all configurable fields)
 	specHash, err := patch.ComputeIndexerSpecHashFull(patch.IndexerSpecInput{
-		Replicas:          replicas,
-		Version:           version,
-		Resources:         resources,
-		StorageSize:       storageSize,
-		JavaOpts:          javaOpts,
-		Image:             image,
-		NodeSelector:      nodeSelector,
-		Tolerations:       tolerations,
-		Affinity:          affinity,
-		Env:               env,
-		EnvFrom:           envFrom,
-		Annotations:       annotations,
-		PodAnnotations:    podAnnotations,
-		MonitoringEnabled: monitoringEnabled,
+		Replicas:                  replicas,
+		Version:                   version,
+		Resources:                 resources,
+		StorageSize:               storageSize,
+		JavaOpts:                  javaOpts,
+		Image:                     image,
+		NodeSelector:              nodeSelector,
+		Tolerations:               tolerations,
+		Affinity:                  affinity,
+		ImagePullSecrets:          imagePullSecrets,
+		TopologySpreadConstraints: topologySpreadConstraints,
+		Env:                       env,
+		EnvFrom:                   envFrom,
+		Annotations:               annotations,
+		PodAnnotations:            podAnnotations,
+		MonitoringEnabled:         monitoringEnabled,
 	})
 	if err != nil {
 		log.Error(err, "Failed to compute indexer spec hash, proceeding without spec hash tracking")
@@ -914,6 +940,9 @@ func (r *IndexerReconciler) reconcileStatefulSetNonBlocking(ctx context.Context,
 		if affinity != nil {
 			stsBuilder.WithAffinity(affinity)
 		}
+		if len(topologySpreadConstraints) > 0 {
+			stsBuilder.WithTopologySpreadConstraints(topologySpreadConstraints)
+		}
 		if len(env) > 0 {
 			stsBuilder.WithEnv(env)
 		}
@@ -928,6 +957,11 @@ func (r *IndexerReconciler) reconcileStatefulSetNonBlocking(ctx context.Context,
 		}
 	}
 
+	// Apply cluster-level imagePullSecrets
+	if len(imagePullSecrets) > 0 {
+		stsBuilder.WithImagePullSecrets(imagePullSecrets)
+	}
+
 	if certHash != "" {
 		stsBuilder.WithCertHash(certHash)
 	}
@@ -938,6 +972,13 @@ func (r *IndexerReconciler) reconcileStatefulSetNonBlocking(ctx context.Context,
 	}
 	// Set cluster reference for monitoring (Prometheus plugin and metrics)
 	stsBuilder.WithCluster(cluster)
+
+	// Set termination grace period (default + user override)
+	terminationGracePeriod := constants.DefaultIndexerTerminationGracePeriod
+	if cluster.Spec.Indexer != nil && cluster.Spec.Indexer.TerminationGracePeriodSeconds != nil {
+		terminationGracePeriod = *cluster.Spec.Indexer.TerminationGracePeriodSeconds
+	}
+	stsBuilder.WithTerminationGracePeriodSeconds(&terminationGracePeriod)
 
 	sts := stsBuilder.Build()
 
@@ -1398,14 +1439,22 @@ func (r *IndexerReconciler) ensureOpenSearchClient(ctx context.Context, cluster 
 		return nil
 	}
 
-	clientFactory := security.NewOpenSearchClientFactory(r.Client)
-	newClient, err := clientFactory.GetClientForCluster(ctx, cluster)
+	factory := r.getClientFactory()
+	newClient, err := factory.GetClientForCluster(ctx, cluster)
 	if err != nil {
 		return err
 	}
 
 	r.osClient = newClient
 	return nil
+}
+
+// getClientFactory returns the shared ClientFactory or creates one as fallback
+func (r *IndexerReconciler) getClientFactory() *security.OpenSearchClientFactory {
+	if r.ClientFactory != nil {
+		return r.ClientFactory
+	}
+	return security.NewOpenSearchClientFactory(r.Client)
 }
 
 // ResetDrainState resets the drain state after a successful scale-down
@@ -1495,17 +1544,17 @@ func (r *IndexerReconciler) updateStatefulSetWithRetry(ctx context.Context, desi
 }
 
 // getStatefulSetPhase returns the phase of a StatefulSet
-func getStatefulSetPhase(sts *appsv1.StatefulSet) string {
+func getStatefulSetPhase(sts *appsv1.StatefulSet) wazuhv1.ComponentStatusPhase {
 	if sts.Status.ReadyReplicas == 0 {
-		return "Starting"
+		return wazuhv1.ComponentStatusPhaseStarting
 	}
 	if sts.Status.ReadyReplicas < sts.Status.Replicas {
-		return "Degraded"
+		return wazuhv1.ComponentStatusPhaseDegraded
 	}
 	if sts.Status.UpdatedReplicas < sts.Status.Replicas {
-		return "Updating"
+		return wazuhv1.ComponentStatusPhaseScaling
 	}
-	return "Ready"
+	return wazuhv1.ComponentStatusPhaseReady
 }
 
 // ReconcileStandalone reconciles a standalone OpenSearchIndexer resource
@@ -1875,8 +1924,7 @@ func (r *IndexerReconciler) reconcileSecurityInitJob(ctx context.Context, cluste
 	}
 
 	// Try to create OpenSearch client and update users
-	clientFactory := security.NewOpenSearchClientFactory(r.Client)
-	osClient, err := clientFactory.GetClientForCluster(ctx, cluster)
+	osClient, err := r.getClientFactory().GetClientForCluster(ctx, cluster)
 	if err != nil {
 		// Auth failed - this is expected on first startup before security auto-init
 		log.V(1).Info("Failed to create OpenSearch client for security sync (expected on first startup)", "error", err)
@@ -1940,9 +1988,8 @@ func (r *IndexerReconciler) CheckSecurityInitialization(ctx context.Context, clu
 		return false, nil
 	}
 
-	// Create OpenSearch client factory and get a client
-	clientFactory := security.NewOpenSearchClientFactory(r.Client)
-	osClient, err := clientFactory.GetClientForCluster(ctx, cluster)
+	// Get an OpenSearch client (cached by the shared factory)
+	osClient, err := r.getClientFactory().GetClientForCluster(ctx, cluster)
 	if err != nil {
 		log.V(1).Info("Failed to create OpenSearch client", "error", err)
 		return false, nil // Not an error, just not ready
@@ -1989,9 +2036,8 @@ func (r *IndexerReconciler) SyncSecurityCRDs(ctx context.Context, cluster *wazuh
 		return nil
 	}
 
-	// Create client factory and synchronizer
-	clientFactory := security.NewOpenSearchClientFactory(r.Client)
-	synchronizer := security.NewSecurityConfigSynchronizer(r.Client, clientFactory, r.Recorder)
+	// Create synchronizer using the shared client factory
+	synchronizer := security.NewSecurityConfigSynchronizer(r.Client, r.getClientFactory(), r.Recorder)
 
 	// Sync all security CRDs
 	result, err := synchronizer.SyncAllForCluster(ctx, cluster)
@@ -2529,11 +2575,19 @@ func (r *IndexerReconciler) reconcileNodePoolStatefulSet(
 	if pool.Affinity != nil {
 		stsBuilder.WithAffinity(pool.Affinity)
 	}
+	if len(pool.TopologySpreadConstraints) > 0 {
+		stsBuilder.WithTopologySpreadConstraints(pool.TopologySpreadConstraints)
+	}
 	if len(pool.Annotations) > 0 {
 		stsBuilder.WithAnnotations(pool.Annotations)
 	}
 	if len(pool.PodAnnotations) > 0 {
 		stsBuilder.WithPodAnnotations(pool.PodAnnotations)
+	}
+
+	// Apply cluster-level imagePullSecrets
+	if len(cluster.Spec.ImagePullSecrets) > 0 {
+		stsBuilder.WithImagePullSecrets(cluster.Spec.ImagePullSecrets)
 	}
 
 	// Compute config hash for change detection
@@ -2543,6 +2597,13 @@ func (r *IndexerReconciler) reconcileNodePoolStatefulSet(
 		configHash := patch.ComputeConfigHash(configMap.Data)
 		stsBuilder.WithConfigHash(configHash)
 	}
+
+	// Set termination grace period (default + user override from indexer spec)
+	terminationGracePeriod := constants.DefaultIndexerTerminationGracePeriod
+	if cluster.Spec.Indexer != nil && cluster.Spec.Indexer.TerminationGracePeriodSeconds != nil {
+		terminationGracePeriod = *cluster.Spec.Indexer.TerminationGracePeriodSeconds
+	}
+	stsBuilder.WithTerminationGracePeriodSeconds(&terminationGracePeriod)
 
 	sts := stsBuilder.Build()
 
@@ -2974,7 +3035,7 @@ func (r *IndexerReconciler) cleanupOrphanedNodePools(ctx context.Context, cluste
 }
 
 // updateNodePoolStatus updates the status for a specific nodePool
-func (r *IndexerReconciler) updateNodePoolStatus(cluster *wazuhv1.WazuhCluster, poolName, phase, message string) {
+func (r *IndexerReconciler) updateNodePoolStatus(cluster *wazuhv1.WazuhCluster, poolName string, phase wazuhv1.NodePoolPhase, message string) {
 	if cluster.Status.Indexer.NodePoolStatuses == nil {
 		cluster.Status.Indexer.NodePoolStatuses = make(map[string]wazuhv1.NodePoolStatus)
 	}
@@ -2991,7 +3052,7 @@ func (r *IndexerReconciler) updateNodePoolStatus(cluster *wazuhv1.WazuhCluster, 
 }
 
 // updateNodePoolStatusFromSts updates nodePool status from StatefulSet state
-func (r *IndexerReconciler) updateNodePoolStatusFromSts(cluster *wazuhv1.WazuhCluster, poolName string, sts *appsv1.StatefulSet, phase string) {
+func (r *IndexerReconciler) updateNodePoolStatusFromSts(cluster *wazuhv1.WazuhCluster, poolName string, sts *appsv1.StatefulSet, phase wazuhv1.NodePoolPhase) {
 	if cluster.Status.Indexer.NodePoolStatuses == nil {
 		cluster.Status.Indexer.NodePoolStatuses = make(map[string]wazuhv1.NodePoolStatus)
 	}
@@ -3016,7 +3077,7 @@ func (r *IndexerReconciler) updateNodePoolStatusFromSts(cluster *wazuhv1.WazuhCl
 }
 
 // getNodePoolPhase determines the phase of a nodePool from its StatefulSet
-func (r *IndexerReconciler) getNodePoolPhase(sts *appsv1.StatefulSet) string {
+func (r *IndexerReconciler) getNodePoolPhase(sts *appsv1.StatefulSet) wazuhv1.NodePoolPhase {
 	if sts.Status.ReadyReplicas == 0 {
 		return wazuhv1.NodePoolPhaseCreating
 	}
@@ -3051,13 +3112,13 @@ func (r *IndexerReconciler) updateIndexerStatusFromNodePools(cluster *wazuhv1.Wa
 
 	// Determine overall phase
 	if totalReady == 0 {
-		cluster.Status.Indexer.Phase = "Starting"
+		cluster.Status.Indexer.Phase = wazuhv1.ComponentStatusPhaseStarting
 	} else if allRunning && totalReady == totalReplicas {
-		cluster.Status.Indexer.Phase = "Ready"
+		cluster.Status.Indexer.Phase = wazuhv1.ComponentStatusPhaseReady
 	} else if totalReady < totalReplicas {
-		cluster.Status.Indexer.Phase = "Scaling"
+		cluster.Status.Indexer.Phase = wazuhv1.ComponentStatusPhaseScaling
 	} else {
-		cluster.Status.Indexer.Phase = "Degraded"
+		cluster.Status.Indexer.Phase = wazuhv1.ComponentStatusPhaseDegraded
 	}
 
 	// Sort phases for consistent output

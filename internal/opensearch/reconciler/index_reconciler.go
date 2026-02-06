@@ -25,11 +25,13 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/tools/record"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	wazuhv1 "github.com/MaximeWewer/wazuh-operator/api/v1"
 	"github.com/MaximeWewer/wazuh-operator/internal/adapters"
 	"github.com/MaximeWewer/wazuh-operator/internal/opensearch/security"
+	"github.com/MaximeWewer/wazuh-operator/pkg/constants"
 )
 
 // IndexReconciler handles reconciliation of OpenSearch indices
@@ -59,6 +61,19 @@ func (r *IndexReconciler) WithClientFactory(factory *security.OpenSearchClientFa
 func (r *IndexReconciler) Reconcile(ctx context.Context, index *wazuhv1.OpenSearchIndex) error {
 	log := logf.FromContext(ctx)
 
+	// Handle finalizer
+	if !controllerutil.ContainsFinalizer(index, constants.IndexFinalizer) {
+		controllerutil.AddFinalizer(index, constants.IndexFinalizer)
+		if err := r.Update(ctx, index); err != nil {
+			return fmt.Errorf("failed to add finalizer: %w", err)
+		}
+	}
+
+	// Check if being deleted
+	if !index.DeletionTimestamp.IsZero() {
+		return r.handleDeletion(ctx, index)
+	}
+
 	// Get OpenSearch client
 	osClient, err := r.getOpenSearchClient(ctx, index)
 	if err != nil {
@@ -86,11 +101,20 @@ func (r *IndexReconciler) Reconcile(ctx context.Context, index *wazuhv1.OpenSear
 		r.recordEvent(index, corev1.EventTypeNormal, "Created", "Index successfully created in OpenSearch")
 		log.Info("Created OpenSearch index", "name", indexName)
 	} else {
-		r.recordEvent(index, corev1.EventTypeNormal, "Synced", "Index already exists in OpenSearch")
+		// Update dynamic settings (number_of_replicas)
+		dynamicSettings := r.buildDynamicSettings(index)
+		if len(dynamicSettings) > 0 {
+			if err := osClient.UpdateIndexSettings(ctx, indexName, dynamicSettings); err != nil {
+				r.recordEvent(index, corev1.EventTypeWarning, "UpdateFailed", fmt.Sprintf("Failed to update index settings: %v", err))
+				return fmt.Errorf("failed to update index settings: %w", err)
+			}
+			r.recordEvent(index, corev1.EventTypeNormal, "Updated", "Index settings updated in OpenSearch")
+			log.Info("Updated OpenSearch index settings", "name", indexName)
+		}
 	}
 
 	// Update status
-	if err := r.updateStatus(ctx, index, "Ready", "Index reconciled successfully"); err != nil {
+	if err := r.updateStatus(ctx, index, wazuhv1.OpenSearchResourcePhaseReady, "Index reconciled successfully"); err != nil {
 		return fmt.Errorf("failed to update status: %w", err)
 	}
 
@@ -128,6 +152,23 @@ func (r *IndexReconciler) buildIndexSettings(index *wazuhv1.OpenSearchIndex) map
 	return settings
 }
 
+// buildDynamicSettings builds only the dynamic settings that can be updated on an existing index
+func (r *IndexReconciler) buildDynamicSettings(index *wazuhv1.OpenSearchIndex) map[string]any {
+	indexSettings := make(map[string]any)
+
+	if index.Spec.Settings != nil && index.Spec.Settings.NumberOfReplicas != nil {
+		indexSettings["number_of_replicas"] = *index.Spec.Settings.NumberOfReplicas
+	}
+
+	if len(indexSettings) == 0 {
+		return nil
+	}
+
+	return map[string]any{
+		"index": indexSettings,
+	}
+}
+
 // getOpenSearchClient gets an OpenSearch HTTP adapter using dynamic client resolution
 func (r *IndexReconciler) getOpenSearchClient(ctx context.Context, index *wazuhv1.OpenSearchIndex) (*adapters.OpenSearchHTTPAdapter, error) {
 	if r.ClientFactory == nil {
@@ -151,13 +192,25 @@ func (r *IndexReconciler) getOpenSearchClient(ctx context.Context, index *wazuhv
 }
 
 // updateStatus updates the index status
-func (r *IndexReconciler) updateStatus(ctx context.Context, index *wazuhv1.OpenSearchIndex, phase, message string) error {
+func (r *IndexReconciler) updateStatus(ctx context.Context, index *wazuhv1.OpenSearchIndex, phase wazuhv1.OpenSearchResourcePhase, message string) error {
 	index.Status.Phase = phase
 	index.Status.Message = message
 	now := metav1.Now()
 	index.Status.LastSyncTime = &now
 
 	return r.Status().Update(ctx, index)
+}
+
+// handleDeletion handles index cleanup on deletion
+func (r *IndexReconciler) handleDeletion(ctx context.Context, index *wazuhv1.OpenSearchIndex) error {
+	log := logf.FromContext(ctx)
+
+	if err := r.Delete(ctx, index); err != nil {
+		log.Error(err, "Failed to delete index from OpenSearch, proceeding with finalizer removal")
+	}
+
+	controllerutil.RemoveFinalizer(index, constants.IndexFinalizer)
+	return r.Update(ctx, index)
 }
 
 // Delete handles cleanup when an index is deleted

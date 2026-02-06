@@ -1,5 +1,5 @@
 /*
-Copyright 2024.
+Copyright 2026.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -51,13 +51,15 @@ type OpenSearchRoleMappingSpec struct {
 type OpenSearchRoleMappingStatus struct {
 	// Phase is the current phase (Pending, Ready, Failed, Conflict)
 	// +optional
-	Phase string `json:"phase,omitempty"`
+	Phase OpenSearchResourcePhase `json:"phase,omitempty"`
 
 	// Message provides additional information about the current phase
 	// +optional
 	Message string `json:"message,omitempty"`
 
 	// Conditions represent the latest available observations
+	// +listType=map
+	// +listMapKey=type
 	// +optional
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
 

@@ -1,5 +1,5 @@
 /*
-Copyright 2024.
+Copyright 2026.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -114,9 +114,11 @@ type TimestampField struct {
 type OpenSearchIndexTemplateStatus struct {
 	// Phase represents the current phase of the index template
 	// +optional
-	Phase string `json:"phase,omitempty"`
+	Phase OpenSearchResourcePhase `json:"phase,omitempty"`
 
 	// Conditions represent the latest available observations of the index template's state
+	// +listType=map
+	// +listMapKey=type
 	// +optional
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
 

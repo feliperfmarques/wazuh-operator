@@ -36,22 +36,22 @@ secrets:
   wazuhApi:
     # -- Wazuh API username
     username: "wazuh-api"
-    # -- Wazuh API password (CHANGE IN PRODUCTION)
-    password: "CHANGE_ME_STRONG_PASSWORD_HERE"
+    # -- Wazuh API password (leave empty for auto-generation by the operator)
+    password: ""
 
   # @extra secrets.indexerAdmin Indexer admin credentials (used by Dashboard and internal components)
   indexerAdmin:
     # -- Indexer admin username
     username: "admin"
-    # -- Indexer admin password (CHANGE IN PRODUCTION)
-    password: "CHANGE_ME_STRONG_PASSWORD_HERE"
+    # -- Indexer admin password (leave empty for auto-generation by the operator)
+    password: ""
 
   # @extra secrets.wazuhAuthd Wazuh authd password for agent enrollment
   wazuhAuthd:
     # -- Enable authd password secret creation
     enabled: true
-    # -- Agent enrollment password (CHANGE IN PRODUCTION)
-    password: "CHANGE_ME_STRONG_PASSWORD_HERE"
+    # -- Agent enrollment password (leave empty for auto-generation by the operator)
+    password: ""
 
 # @section External Secrets Operator (ESO)
 # Integration with external secret providers (HashiCorp Vault, AWS Secrets Manager, Azure Key Vault, GCP Secret Manager).
@@ -123,6 +123,10 @@ cluster:
     # -- Wazuh version to deploy
     version: "4.9.0"
 
+    # -- Image pull secrets for private container registries (applied to all components)
+    # imagePullSecrets:
+    #   - name: my-registry-secret
+
     # Note: If sizing.profile is set, replicas/resources/storage are auto-configured.
     # Values below are ONLY used if sizing.profile is empty ("").
 
@@ -140,6 +144,13 @@ cluster:
       #   enabled: true
       #   type: required  # or "preferred"
       #   topologyKey: kubernetes.io/hostname
+      # topologySpreadConstraints:
+      #   - maxSkew: 1
+      #     topologyKey: kubernetes.io/hostname
+      #     whenUnsatisfiable: DoNotSchedule
+      #     labelSelector:
+      #       matchLabels:
+      #         app: wazuh-indexer
       # hpa:
       #   enabled: true
       #   minReplicas: 3
@@ -172,6 +183,10 @@ cluster:
         # storageSize: 20Gi
         # resources:
         #   requests: { cpu: "1", memory: 2Gi }
+        # topologySpreadConstraints:
+        #   - maxSkew: 1
+        #     topologyKey: kubernetes.io/hostname
+        #     whenUnsatisfiable: DoNotSchedule
         # ingress:
         #   enabled: true
         #   ingressClassName: nginx
@@ -187,6 +202,10 @@ cluster:
         {}
         # replicas: 2
         # storageSize: 20Gi
+        # topologySpreadConstraints:
+        #   - maxSkew: 1
+        #     topologyKey: kubernetes.io/hostname
+        #     whenUnsatisfiable: DoNotSchedule
         # hpa:
         #   enabled: true
         #   minReplicas: 2
@@ -211,6 +230,10 @@ cluster:
       # replicas: 1
       # resources:
       #   requests: { cpu: "500m", memory: 1Gi }
+      # topologySpreadConstraints:
+      #   - maxSkew: 1
+      #     topologyKey: kubernetes.io/hostname
+      #     whenUnsatisfiable: DoNotSchedule
       # hpa:
       #   enabled: true
       #   minReplicas: 2

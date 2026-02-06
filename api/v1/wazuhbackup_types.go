@@ -163,7 +163,7 @@ type BackupImage struct {
 type WazuhBackupStatus struct {
 	// Phase is the current phase (Pending, Active, Suspended, Failed)
 	// +optional
-	Phase string `json:"phase,omitempty"`
+	Phase BackupPhase `json:"phase,omitempty"`
 
 	// Message provides additional information about the current phase
 	// +optional
@@ -201,6 +201,8 @@ type WazuhBackupStatus struct {
 	JobName string `json:"jobName,omitempty"`
 
 	// Conditions represent the latest available observations
+	// +listType=map
+	// +listMapKey=type
 	// +optional
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
 

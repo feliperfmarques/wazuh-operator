@@ -112,7 +112,7 @@ type SnapshotRepositorySettings struct {
 type OpenSearchSnapshotRepositoryStatus struct {
 	// Phase is the current phase (Pending, Creating, Verifying, Ready, Failed, Deleting)
 	// +optional
-	Phase string `json:"phase,omitempty"`
+	Phase RepositoryPhase `json:"phase,omitempty"`
 
 	// Message provides additional information about the current phase
 	// +optional
@@ -131,6 +131,8 @@ type OpenSearchSnapshotRepositoryStatus struct {
 	SnapshotCount int32 `json:"snapshotCount,omitempty"`
 
 	// Conditions represent the latest available observations
+	// +listType=map
+	// +listMapKey=type
 	// +optional
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
 

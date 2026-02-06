@@ -25,11 +25,13 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/tools/record"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	wazuhv1 "github.com/MaximeWewer/wazuh-operator/api/v1"
 	"github.com/MaximeWewer/wazuh-operator/internal/adapters"
 	"github.com/MaximeWewer/wazuh-operator/internal/opensearch/security"
+	"github.com/MaximeWewer/wazuh-operator/pkg/constants"
 )
 
 // RoleReconciler handles reconciliation of OpenSearch roles
@@ -59,6 +61,19 @@ func (r *RoleReconciler) WithClientFactory(factory *security.OpenSearchClientFac
 func (r *RoleReconciler) Reconcile(ctx context.Context, role *wazuhv1.OpenSearchRole) error {
 	log := logf.FromContext(ctx)
 
+	// Handle finalizer
+	if !controllerutil.ContainsFinalizer(role, constants.RoleFinalizer) {
+		controllerutil.AddFinalizer(role, constants.RoleFinalizer)
+		if err := r.Update(ctx, role); err != nil {
+			return fmt.Errorf("failed to add finalizer: %w", err)
+		}
+	}
+
+	// Check if being deleted
+	if !role.DeletionTimestamp.IsZero() {
+		return r.handleDeletion(ctx, role)
+	}
+
 	osClient, err := r.getOpenSearchClient(ctx, role)
 	if err != nil {
 		r.recordEvent(role, corev1.EventTypeWarning, "ConnectionError", fmt.Sprintf("Failed to connect to OpenSearch: %v", err))
@@ -78,7 +93,7 @@ func (r *RoleReconciler) Reconcile(ctx context.Context, role *wazuhv1.OpenSearch
 	r.recordEvent(role, corev1.EventTypeNormal, "Synced", "Role successfully synchronized to OpenSearch")
 
 	// Update status
-	if err := r.updateStatus(ctx, role, "Ready", "Role reconciled successfully"); err != nil {
+	if err := r.updateStatus(ctx, role, wazuhv1.OpenSearchResourcePhaseReady, "Role reconciled successfully"); err != nil {
 		return fmt.Errorf("failed to update status: %w", err)
 	}
 
@@ -142,13 +157,25 @@ func (r *RoleReconciler) getOpenSearchClient(ctx context.Context, role *wazuhv1.
 }
 
 // updateStatus updates the role status
-func (r *RoleReconciler) updateStatus(ctx context.Context, role *wazuhv1.OpenSearchRole, phase, message string) error {
+func (r *RoleReconciler) updateStatus(ctx context.Context, role *wazuhv1.OpenSearchRole, phase wazuhv1.OpenSearchResourcePhase, message string) error {
 	role.Status.Phase = phase
 	role.Status.Message = message
 	now := metav1.Now()
 	role.Status.LastSyncTime = &now
 
 	return r.Status().Update(ctx, role)
+}
+
+// handleDeletion handles role cleanup on deletion
+func (r *RoleReconciler) handleDeletion(ctx context.Context, role *wazuhv1.OpenSearchRole) error {
+	log := logf.FromContext(ctx)
+
+	if err := r.Delete(ctx, role); err != nil {
+		log.Error(err, "Failed to delete role from OpenSearch, proceeding with finalizer removal")
+	}
+
+	controllerutil.RemoveFinalizer(role, constants.RoleFinalizer)
+	return r.Update(ctx, role)
 }
 
 // Delete handles cleanup when a role is deleted

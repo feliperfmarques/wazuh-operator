@@ -34,28 +34,32 @@ import (
 
 // IndexerStatefulSetBuilder builds a StatefulSet for OpenSearch Indexer
 type IndexerStatefulSetBuilder struct {
-	name             string
-	namespace        string
-	clusterName      string
-	version          string
-	replicas         int32
-	storageSize      string
-	storageClassName *string
-	resources        *corev1.ResourceRequirements
-	image            string
-	nodeSelector     map[string]string
-	tolerations      []corev1.Toleration
-	affinity         *corev1.Affinity
-	labels           map[string]string
-	annotations      map[string]string
-	podAnnotations   map[string]string
-	env              []corev1.EnvVar
-	envFrom          []corev1.EnvFromSource
-	volumes          []corev1.Volume
-	volumeMounts     []corev1.VolumeMount
-	javaOpts         string
+	name                      string
+	namespace                 string
+	clusterName               string
+	version                   string
+	replicas                  int32
+	storageSize               string
+	storageClassName          *string
+	resources                 *corev1.ResourceRequirements
+	image                     string
+	nodeSelector              map[string]string
+	tolerations               []corev1.Toleration
+	affinity                  *corev1.Affinity
+	imagePullSecrets          []corev1.LocalObjectReference
+	topologySpreadConstraints []corev1.TopologySpreadConstraint
+	labels                    map[string]string
+	annotations               map[string]string
+	podAnnotations            map[string]string
+	env                       []corev1.EnvVar
+	envFrom                   []corev1.EnvFromSource
+	volumes                   []corev1.Volume
+	volumeMounts              []corev1.VolumeMount
+	javaOpts                  string
 	// Monitoring configuration
 	cluster *wazuhv1.WazuhCluster
+	// Termination grace period
+	terminationGracePeriodSeconds *int64
 }
 
 // NewIndexerStatefulSetBuilder creates a new IndexerStatefulSetBuilder
@@ -125,6 +129,18 @@ func (b *IndexerStatefulSetBuilder) WithTolerations(tolerations []corev1.Tolerat
 // WithAffinity sets the affinity
 func (b *IndexerStatefulSetBuilder) WithAffinity(affinity *corev1.Affinity) *IndexerStatefulSetBuilder {
 	b.affinity = affinity
+	return b
+}
+
+// WithImagePullSecrets sets the image pull secrets
+func (b *IndexerStatefulSetBuilder) WithImagePullSecrets(secrets []corev1.LocalObjectReference) *IndexerStatefulSetBuilder {
+	b.imagePullSecrets = secrets
+	return b
+}
+
+// WithTopologySpreadConstraints sets the topology spread constraints
+func (b *IndexerStatefulSetBuilder) WithTopologySpreadConstraints(constraints []corev1.TopologySpreadConstraint) *IndexerStatefulSetBuilder {
+	b.topologySpreadConstraints = constraints
 	return b
 }
 
@@ -220,6 +236,12 @@ func (b *IndexerStatefulSetBuilder) WithCluster(cluster *wazuhv1.WazuhCluster) *
 	return b
 }
 
+// WithTerminationGracePeriodSeconds sets the termination grace period for pods
+func (b *IndexerStatefulSetBuilder) WithTerminationGracePeriodSeconds(seconds *int64) *IndexerStatefulSetBuilder {
+	b.terminationGracePeriodSeconds = seconds
+	return b
+}
+
 // Build creates the StatefulSet
 func (b *IndexerStatefulSetBuilder) Build() *appsv1.StatefulSet {
 	labels := b.buildLabels()
@@ -294,9 +316,12 @@ func (b *IndexerStatefulSetBuilder) Build() *appsv1.StatefulSet {
 					Annotations: b.podAnnotations,
 				},
 				Spec: corev1.PodSpec{
-					NodeSelector: b.nodeSelector,
-					Tolerations:  b.tolerations,
-					Affinity:     b.affinity,
+					TerminationGracePeriodSeconds: b.terminationGracePeriodSeconds,
+					NodeSelector:                  b.nodeSelector,
+					Tolerations:                   b.tolerations,
+					Affinity:                      b.affinity,
+					ImagePullSecrets:              b.imagePullSecrets,
+					TopologySpreadConstraints:     b.topologySpreadConstraints,
 					SecurityContext: &corev1.PodSecurityContext{
 						FSGroup:   &fsGroup,
 						RunAsUser: &runAsUser,
@@ -435,7 +460,9 @@ func (b *IndexerStatefulSetBuilder) buildVolumes() []corev1.Volume {
 		{
 			Name: constants.VolumeNameConfigProcessed,
 			VolumeSource: corev1.VolumeSource{
-				EmptyDir: &corev1.EmptyDirVolumeSource{},
+				EmptyDir: &corev1.EmptyDirVolumeSource{
+					SizeLimit: func() *resource.Quantity { q := resource.MustParse("10Mi"); return &q }(),
+				},
 			},
 		},
 	}

@@ -23,11 +23,13 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	wazuhv1 "github.com/MaximeWewer/wazuh-operator/api/v1"
 	"github.com/MaximeWewer/wazuh-operator/internal/opensearch/api"
 	"github.com/MaximeWewer/wazuh-operator/internal/opensearch/security"
+	"github.com/MaximeWewer/wazuh-operator/pkg/constants"
 )
 
 // ComponentTemplateReconciler handles reconciliation of OpenSearch component templates
@@ -55,8 +57,21 @@ func (r *ComponentTemplateReconciler) WithClientFactory(factory *security.OpenSe
 func (r *ComponentTemplateReconciler) Reconcile(ctx context.Context, template *wazuhv1.OpenSearchComponentTemplate) error {
 	log := logf.FromContext(ctx)
 
+	// Handle finalizer
+	if !controllerutil.ContainsFinalizer(template, constants.ComponentTemplateFinalizer) {
+		controllerutil.AddFinalizer(template, constants.ComponentTemplateFinalizer)
+		if err := r.Update(ctx, template); err != nil {
+			return fmt.Errorf("failed to add finalizer: %w", err)
+		}
+	}
+
+	// Check if being deleted
+	if !template.DeletionTimestamp.IsZero() {
+		return r.handleDeletion(ctx, template)
+	}
+
 	if r.ClientFactory == nil {
-		return r.updateStatus(ctx, template, "Pending", "Waiting for OpenSearch client factory")
+		return r.updateStatus(ctx, template, wazuhv1.OpenSearchResourcePhasePending, "Waiting for OpenSearch client factory")
 	}
 
 	apiClient, err := r.ClientFactory.GetClientForRef(ctx, template.Spec.ClusterRef, template.Namespace)
@@ -70,7 +85,7 @@ func (r *ComponentTemplateReconciler) Reconcile(ctx context.Context, template *w
 	// Check if component template exists
 	exists, err := templatesAPI.ComponentTemplateExists(ctx, template.Name)
 	if err != nil {
-		if updateErr := r.updateStatus(ctx, template, "Error", fmt.Sprintf("Failed to check template existence: %v", err)); updateErr != nil {
+		if updateErr := r.updateStatus(ctx, template, wazuhv1.OpenSearchResourcePhaseFailed, fmt.Sprintf("Failed to check template existence: %v", err)); updateErr != nil {
 			log.Error(updateErr, "Failed to update status")
 		}
 		return fmt.Errorf("failed to check component template existence: %w", err)
@@ -90,14 +105,14 @@ func (r *ComponentTemplateReconciler) Reconcile(ctx context.Context, template *w
 		if exists {
 			action = "update"
 		}
-		if updateErr := r.updateStatus(ctx, template, "Error", fmt.Sprintf("Failed to %s template: %v", action, err)); updateErr != nil {
+		if updateErr := r.updateStatus(ctx, template, wazuhv1.OpenSearchResourcePhaseFailed, fmt.Sprintf("Failed to %s template: %v", action, err)); updateErr != nil {
 			log.Error(updateErr, "Failed to update status")
 		}
 		return fmt.Errorf("failed to %s component template: %w", action, err)
 	}
 
 	// Update status
-	if err := r.updateStatus(ctx, template, "Ready", "Component template reconciled successfully"); err != nil {
+	if err := r.updateStatus(ctx, template, wazuhv1.OpenSearchResourcePhaseReady, "Component template reconciled successfully"); err != nil {
 		return fmt.Errorf("failed to update status: %w", err)
 	}
 
@@ -124,13 +139,25 @@ func (r *ComponentTemplateReconciler) buildComponentTemplate(template *wazuhv1.O
 }
 
 // updateStatus updates the template status
-func (r *ComponentTemplateReconciler) updateStatus(ctx context.Context, template *wazuhv1.OpenSearchComponentTemplate, phase, message string) error {
+func (r *ComponentTemplateReconciler) updateStatus(ctx context.Context, template *wazuhv1.OpenSearchComponentTemplate, phase wazuhv1.OpenSearchResourcePhase, message string) error {
 	template.Status.Phase = phase
 	template.Status.Message = message
 	now := metav1.Now()
 	template.Status.LastSyncTime = &now
 
 	return r.Status().Update(ctx, template)
+}
+
+// handleDeletion handles component template cleanup on deletion
+func (r *ComponentTemplateReconciler) handleDeletion(ctx context.Context, template *wazuhv1.OpenSearchComponentTemplate) error {
+	log := logf.FromContext(ctx)
+
+	if err := r.Delete(ctx, template); err != nil {
+		log.Error(err, "Failed to delete component template from OpenSearch, proceeding with finalizer removal")
+	}
+
+	controllerutil.RemoveFinalizer(template, constants.ComponentTemplateFinalizer)
+	return r.Update(ctx, template)
 }
 
 // Delete handles cleanup when a component template is deleted

@@ -220,13 +220,47 @@ func (r *DashboardReconciler) reconcileConfigMap(ctx context.Context, cluster *w
 		}
 	}
 
-	configMap := configBuilder.Build()
+	// Auto-resolve default API credentials from the operator-managed secret
+	// when no explicit wazuhPlugin credentials are configured
+	if configBuilder.NeedsDefaultCredentials() {
+		resolvedCredentials := make(map[string]string)
+		apiSecretName := constants.APICredentialsName(cluster.Name)
+		apiSecret := &corev1.Secret{}
+		if err := r.Get(ctx, types.NamespacedName{Name: apiSecretName, Namespace: cluster.Namespace}, apiSecret); err == nil {
+			if username, ok := apiSecret.Data[constants.SecretKeyAPIUsername]; ok {
+				resolvedCredentials["default:username"] = string(username)
+			}
+			if password, ok := apiSecret.Data[constants.SecretKeyAPIPassword]; ok {
+				resolvedCredentials["default:password"] = string(password)
+			}
+			if len(resolvedCredentials) > 0 {
+				configBuilder.WithResolvedCredentials(resolvedCredentials)
+			}
+		} else {
+			log.V(1).Info("Could not find API credentials secret for dashboard", "secret", apiSecretName)
+		}
+	}
+
+	configMap, err := configBuilder.Build()
+	if err != nil {
+		return fmt.Errorf("failed to build dashboard configmap: %w", err)
+	}
 
 	if err := controllerutil.SetControllerReference(cluster, configMap, r.Scheme); err != nil {
 		return fmt.Errorf("failed to set controller reference for dashboard configmap: %w", err)
 	}
 
-	return r.createOrUpdate(ctx, configMap)
+	if err := r.createOrUpdate(ctx, configMap); err != nil {
+		return err
+	}
+
+	// Reconcile the wazuh.yml Secret (credentials stored in a Secret, not a ConfigMap)
+	wazuhSecret := configBuilder.BuildWazuhConfigSecret()
+	if err := controllerutil.SetControllerReference(cluster, wazuhSecret, r.Scheme); err != nil {
+		return fmt.Errorf("failed to set controller reference for dashboard wazuh config secret: %w", err)
+	}
+
+	return r.createOrUpdate(ctx, wazuhSecret)
 }
 
 // getConfigHash retrieves the current config hash from the dashboard ConfigMap
@@ -347,13 +381,13 @@ func (r *DashboardReconciler) reconcileDeploymentWithCertHash(ctx context.Contex
 		deployBuilder.WithVersion(cluster.Spec.Version)
 	}
 
-	if cluster.Spec.Dashboard.Replicas > 0 {
-		deployBuilder.WithReplicas(cluster.Spec.Dashboard.Replicas)
-	}
-	if cluster.Spec.Dashboard.Resources != nil {
-		deployBuilder.WithResources(cluster.Spec.Dashboard.Resources)
-	}
 	if cluster.Spec.Dashboard != nil {
+		if cluster.Spec.Dashboard.Replicas > 0 {
+			deployBuilder.WithReplicas(cluster.Spec.Dashboard.Replicas)
+		}
+		if cluster.Spec.Dashboard.Resources != nil {
+			deployBuilder.WithResources(cluster.Spec.Dashboard.Resources)
+		}
 		if len(cluster.Spec.Dashboard.Annotations) > 0 {
 			deployBuilder.WithAnnotations(cluster.Spec.Dashboard.Annotations)
 		}
@@ -366,6 +400,13 @@ func (r *DashboardReconciler) reconcileDeploymentWithCertHash(ctx context.Contex
 	if certHash != "" {
 		deployBuilder.WithCertHash(certHash)
 	}
+
+	// Set termination grace period (default + user override)
+	terminationGracePeriod := constants.DefaultDashboardTerminationGracePeriod
+	if cluster.Spec.Dashboard != nil && cluster.Spec.Dashboard.TerminationGracePeriodSeconds != nil {
+		terminationGracePeriod = *cluster.Spec.Dashboard.TerminationGracePeriodSeconds
+	}
+	deployBuilder.WithTerminationGracePeriodSeconds(&terminationGracePeriod)
 
 	deployment := deployBuilder.Build()
 	if err := controllerutil.SetControllerReference(cluster, deployment, r.Scheme); err != nil {
@@ -405,7 +446,10 @@ func (r *DashboardReconciler) reconcileDeploymentWithCertHash(ctx context.Contex
 	}
 
 	// Check if replicas changed
-	desiredReplicas := cluster.Spec.Dashboard.Replicas
+	var desiredReplicas int32
+	if cluster.Spec.Dashboard != nil {
+		desiredReplicas = cluster.Spec.Dashboard.Replicas
+	}
 	if found.Spec.Replicas != nil && *found.Spec.Replicas != desiredReplicas {
 		log.Info("Updating Dashboard Deployment due to replica count change",
 			"name", deployment.Name,
@@ -671,23 +715,28 @@ func (r *DashboardReconciler) reconcileDeploymentNonBlocking(ctx context.Context
 
 	// Extract spec values for hash computation
 	var (
-		replicas       = cluster.Spec.Dashboard.Replicas
-		version        = cluster.Spec.Version
-		resources      = cluster.Spec.Dashboard.Resources
-		image          string
-		nodeSelector   map[string]string
-		tolerations    []corev1.Toleration
-		affinity       *corev1.Affinity
-		env            []corev1.EnvVar
-		envFrom        []corev1.EnvFromSource
-		annotations    map[string]string
-		podAnnotations map[string]string
+		replicas                  int32
+		version                   = cluster.Spec.Version
+		resources                 *corev1.ResourceRequirements
+		image                     string
+		nodeSelector              map[string]string
+		tolerations               []corev1.Toleration
+		affinity                  *corev1.Affinity
+		topologySpreadConstraints []corev1.TopologySpreadConstraint
+		env                       []corev1.EnvVar
+		envFrom                   []corev1.EnvFromSource
+		annotations               map[string]string
+		podAnnotations            map[string]string
 	)
+	imagePullSecrets := cluster.Spec.ImagePullSecrets
 
 	if cluster.Spec.Dashboard != nil {
+		replicas = cluster.Spec.Dashboard.Replicas
+		resources = cluster.Spec.Dashboard.Resources
 		nodeSelector = cluster.Spec.Dashboard.NodeSelector
 		tolerations = cluster.Spec.Dashboard.Tolerations
 		affinity = cluster.Spec.Dashboard.Affinity
+		topologySpreadConstraints = cluster.Spec.Dashboard.TopologySpreadConstraints
 		env = cluster.Spec.Dashboard.Env
 		envFrom = cluster.Spec.Dashboard.EnvFrom
 		annotations = cluster.Spec.Dashboard.Annotations
@@ -696,17 +745,19 @@ func (r *DashboardReconciler) reconcileDeploymentNonBlocking(ctx context.Context
 
 	// Compute spec hash for change detection (includes all configurable fields)
 	specHash, err := patch.ComputeDashboardSpecHashFull(patch.DashboardSpecInput{
-		Replicas:       replicas,
-		Version:        version,
-		Resources:      resources,
-		Image:          image,
-		NodeSelector:   nodeSelector,
-		Tolerations:    tolerations,
-		Affinity:       affinity,
-		Env:            env,
-		EnvFrom:        envFrom,
-		Annotations:    annotations,
-		PodAnnotations: podAnnotations,
+		Replicas:                  replicas,
+		Version:                   version,
+		Resources:                 resources,
+		Image:                     image,
+		NodeSelector:              nodeSelector,
+		Tolerations:               tolerations,
+		Affinity:                  affinity,
+		ImagePullSecrets:          imagePullSecrets,
+		TopologySpreadConstraints: topologySpreadConstraints,
+		Env:                       env,
+		EnvFrom:                   envFrom,
+		Annotations:               annotations,
+		PodAnnotations:            podAnnotations,
 	})
 	if err != nil {
 		log.Error(err, "Failed to compute dashboard spec hash, continuing without spec tracking")
@@ -722,11 +773,11 @@ func (r *DashboardReconciler) reconcileDeploymentNonBlocking(ctx context.Context
 		deployBuilder.WithVersion(cluster.Spec.Version)
 	}
 
-	if cluster.Spec.Dashboard.Replicas > 0 {
-		deployBuilder.WithReplicas(cluster.Spec.Dashboard.Replicas)
+	if replicas > 0 {
+		deployBuilder.WithReplicas(replicas)
 	}
-	if cluster.Spec.Dashboard.Resources != nil {
-		deployBuilder.WithResources(cluster.Spec.Dashboard.Resources)
+	if resources != nil {
+		deployBuilder.WithResources(resources)
 	}
 	if nodeSelector != nil {
 		deployBuilder.WithNodeSelector(nodeSelector)
@@ -736,6 +787,12 @@ func (r *DashboardReconciler) reconcileDeploymentNonBlocking(ctx context.Context
 	}
 	if affinity != nil {
 		deployBuilder.WithAffinity(affinity)
+	}
+	if len(topologySpreadConstraints) > 0 {
+		deployBuilder.WithTopologySpreadConstraints(topologySpreadConstraints)
+	}
+	if len(imagePullSecrets) > 0 {
+		deployBuilder.WithImagePullSecrets(imagePullSecrets)
 	}
 	if len(env) > 0 {
 		deployBuilder.WithEnv(env)
@@ -967,17 +1024,17 @@ func (r *DashboardReconciler) updateDeploymentWithRetry(ctx context.Context, des
 }
 
 // getDeploymentPhase returns the phase of a Deployment
-func getDeploymentPhase(dep *appsv1.Deployment) string {
+func getDeploymentPhase(dep *appsv1.Deployment) wazuhv1.ComponentStatusPhase {
 	if dep.Status.ReadyReplicas == 0 {
-		return "Starting"
+		return wazuhv1.ComponentStatusPhaseStarting
 	}
 	if dep.Status.ReadyReplicas < dep.Status.Replicas {
-		return "Degraded"
+		return wazuhv1.ComponentStatusPhaseDegraded
 	}
 	if dep.Status.UpdatedReplicas < dep.Status.Replicas {
-		return "Updating"
+		return wazuhv1.ComponentStatusPhaseScaling
 	}
-	return "Ready"
+	return wazuhv1.ComponentStatusPhaseReady
 }
 
 // ReconcileStandalone reconciles a standalone OpenSearchDashboard resource
@@ -1033,7 +1090,10 @@ func (r *DashboardReconciler) ReconcileStandalone(ctx context.Context, dashboard
 			configBuilder.WithResolvedCredentials(resolvedCredentials)
 		}
 	}
-	configMap := configBuilder.Build()
+	configMap, err := configBuilder.Build()
+	if err != nil {
+		return fmt.Errorf("failed to build dashboard configmap: %w", err)
+	}
 
 	if err := controllerutil.SetControllerReference(dashboard, configMap, r.Scheme); err != nil {
 		return fmt.Errorf("failed to set controller reference for configmap: %w", err)
@@ -1041,6 +1101,15 @@ func (r *DashboardReconciler) ReconcileStandalone(ctx context.Context, dashboard
 
 	if err := r.createOrUpdate(ctx, configMap); err != nil {
 		return fmt.Errorf("failed to reconcile configmap: %w", err)
+	}
+
+	// Build wazuh.yml Secret (credentials stored in Secret, not ConfigMap)
+	wazuhSecret := configBuilder.BuildWazuhConfigSecret()
+	if err := controllerutil.SetControllerReference(dashboard, wazuhSecret, r.Scheme); err != nil {
+		return fmt.Errorf("failed to set controller reference for wazuh config secret: %w", err)
+	}
+	if err := r.createOrUpdate(ctx, wazuhSecret); err != nil {
+		return fmt.Errorf("failed to reconcile wazuh config secret: %w", err)
 	}
 
 	// Build Service

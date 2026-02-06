@@ -31,7 +31,6 @@ import (
 	"github.com/MaximeWewer/wazuh-operator/internal/metrics"
 	opensearchreconciler "github.com/MaximeWewer/wazuh-operator/internal/opensearch/reconciler"
 	"github.com/MaximeWewer/wazuh-operator/internal/telemetry"
-	"github.com/MaximeWewer/wazuh-operator/pkg/constants"
 )
 
 // OpenSearchSnapshotReconciler reconciles a OpenSearchSnapshot object
@@ -48,7 +47,7 @@ type OpenSearchSnapshotReconciler struct {
 // +kubebuilder:rbac:groups=resources.wazuh.com,resources=opensearchsnapshots/finalizers,verbs=update
 
 // Reconcile is the main reconciliation loop for OpenSearchSnapshot
-func (r *OpenSearchSnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+func (r *OpenSearchSnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ctrl.Result, reconcileErr error) {
 	// Start tracing span
 	ctx, span := telemetry.Tracer().Start(ctx, "OpenSearchSnapshot.Reconcile",
 		telemetry.WithAttributes(
@@ -59,8 +58,11 @@ func (r *OpenSearchSnapshotReconciler) Reconcile(ctx context.Context, req ctrl.R
 
 	// Track reconciliation metrics
 	startTime := time.Now()
-	var reconcileResult = "success"
 	defer func() {
+		reconcileResult := "success"
+		if reconcileErr != nil {
+			reconcileResult = "error"
+		}
 		duration := time.Since(startTime).Seconds()
 		metrics.RecordReconciliation("OpenSearchSnapshot", req.Namespace, reconcileResult, duration)
 	}()
@@ -86,7 +88,7 @@ func (r *OpenSearchSnapshotReconciler) Reconcile(ctx context.Context, req ctrl.R
 	}
 
 	// Requeue if snapshot is still in progress
-	if snapshot.Status.Phase == constants.SnapshotPhaseInProgress || snapshot.Status.Phase == constants.SnapshotPhasePending {
+	if snapshot.Status.Phase == wazuhv1.SnapshotPhaseInProgress || snapshot.Status.Phase == wazuhv1.SnapshotPhasePending {
 		log.Info("Snapshot in progress, requeuing for status check", "name", snapshot.Name)
 		return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
 	}

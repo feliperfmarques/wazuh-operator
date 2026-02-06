@@ -146,7 +146,7 @@ type RestoreComponents struct {
 type WazuhRestoreStatus struct {
 	// Phase is the current phase
 	// +optional
-	Phase string `json:"phase,omitempty"`
+	Phase WazuhRestorePhase `json:"phase,omitempty"`
 
 	// Message provides additional information about the current phase
 	// +optional
@@ -181,6 +181,8 @@ type WazuhRestoreStatus struct {
 	JobName string `json:"jobName,omitempty"`
 
 	// Conditions represent the latest available observations
+	// +listType=map
+	// +listMapKey=type
 	// +optional
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
 

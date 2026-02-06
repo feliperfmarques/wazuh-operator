@@ -33,7 +33,6 @@ import (
 	"github.com/MaximeWewer/wazuh-operator/internal/metrics"
 	"github.com/MaximeWewer/wazuh-operator/internal/telemetry"
 	wazuhreconciler "github.com/MaximeWewer/wazuh-operator/internal/wazuh/reconciler"
-	"github.com/MaximeWewer/wazuh-operator/pkg/constants"
 )
 
 // WazuhBackupReconciler reconciles a WazuhBackup object
@@ -55,7 +54,7 @@ type WazuhBackupReconciler struct {
 // +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=rolebindings,verbs=get;list;watch;create;update;patch;delete
 
 // Reconcile is the main reconciliation loop for WazuhBackup
-func (r *WazuhBackupReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+func (r *WazuhBackupReconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ctrl.Result, reconcileErr error) {
 	// Start tracing span
 	ctx, span := telemetry.Tracer().Start(ctx, "WazuhBackup.Reconcile",
 		telemetry.WithAttributes(
@@ -66,8 +65,11 @@ func (r *WazuhBackupReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 
 	// Track reconciliation metrics
 	startTime := time.Now()
-	var reconcileResult = "success"
 	defer func() {
+		reconcileResult := "success"
+		if reconcileErr != nil {
+			reconcileResult = "error"
+		}
 		duration := time.Since(startTime).Seconds()
 		metrics.RecordReconciliation("WazuhBackup", req.Namespace, reconcileResult, duration)
 	}()
@@ -93,7 +95,7 @@ func (r *WazuhBackupReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	}
 
 	// Requeue periodically to check job status for one-shot backups
-	if !backup.IsScheduled() && backup.Status.Phase != constants.WazuhBackupPhaseFailed {
+	if !backup.IsScheduled() && backup.Status.Phase != wazuhv1.BackupPhaseFailed {
 		// Check job status periodically until completed
 		if backup.Status.LastBackup == nil || backup.Status.LastBackup.Status == "" {
 			log.Info("One-shot backup in progress, requeuing for status check", "name", backup.Name)

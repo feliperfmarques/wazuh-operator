@@ -23,11 +23,13 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	wazuhv1 "github.com/MaximeWewer/wazuh-operator/api/v1"
 	"github.com/MaximeWewer/wazuh-operator/internal/opensearch/api"
 	"github.com/MaximeWewer/wazuh-operator/internal/opensearch/security"
+	"github.com/MaximeWewer/wazuh-operator/pkg/constants"
 )
 
 // RoleMappingReconciler handles reconciliation of OpenSearch role mappings
@@ -55,8 +57,21 @@ func (r *RoleMappingReconciler) WithClientFactory(factory *security.OpenSearchCl
 func (r *RoleMappingReconciler) Reconcile(ctx context.Context, mapping *wazuhv1.OpenSearchRoleMapping) error {
 	log := logf.FromContext(ctx)
 
+	// Handle finalizer
+	if !controllerutil.ContainsFinalizer(mapping, constants.RoleMappingFinalizer) {
+		controllerutil.AddFinalizer(mapping, constants.RoleMappingFinalizer)
+		if err := r.Update(ctx, mapping); err != nil {
+			return fmt.Errorf("failed to add finalizer: %w", err)
+		}
+	}
+
+	// Check if being deleted
+	if !mapping.DeletionTimestamp.IsZero() {
+		return r.handleDeletion(ctx, mapping)
+	}
+
 	if r.ClientFactory == nil {
-		return r.updateStatus(ctx, mapping, "Pending", "Waiting for OpenSearch client factory")
+		return r.updateStatus(ctx, mapping, wazuhv1.OpenSearchResourcePhasePending, "Waiting for OpenSearch client factory")
 	}
 
 	apiClient, err := r.ClientFactory.GetClientForRef(ctx, mapping.Spec.ClusterRef, mapping.Namespace)
@@ -69,7 +84,7 @@ func (r *RoleMappingReconciler) Reconcile(ctx context.Context, mapping *wazuhv1.
 	// Check if role mapping exists
 	existing, err := securityAPI.GetRoleMapping(ctx, mapping.Name)
 	if err != nil {
-		if updateErr := r.updateStatus(ctx, mapping, "Error", fmt.Sprintf("Failed to check role mapping existence: %v", err)); updateErr != nil {
+		if updateErr := r.updateStatus(ctx, mapping, wazuhv1.OpenSearchResourcePhaseFailed, fmt.Sprintf("Failed to check role mapping existence: %v", err)); updateErr != nil {
 			log.Error(updateErr, "Failed to update status")
 		}
 		return fmt.Errorf("failed to check role mapping existence: %w", err)
@@ -79,18 +94,23 @@ func (r *RoleMappingReconciler) Reconcile(ctx context.Context, mapping *wazuhv1.
 	roleMapping := r.buildRoleMapping(mapping)
 
 	if existing == nil {
-		// Create new role mapping
 		log.Info("Creating role mapping", "name", mapping.Name)
-		if err := securityAPI.CreateRoleMapping(ctx, mapping.Name, roleMapping); err != nil {
-			if updateErr := r.updateStatus(ctx, mapping, "Error", fmt.Sprintf("Failed to create role mapping: %v", err)); updateErr != nil {
-				log.Error(updateErr, "Failed to update status")
-			}
-			return fmt.Errorf("failed to create role mapping: %w", err)
+	} else {
+		log.Info("Updating role mapping", "name", mapping.Name)
+	}
+	if err := securityAPI.CreateRoleMapping(ctx, mapping.Name, roleMapping); err != nil {
+		action := "create"
+		if existing != nil {
+			action = "update"
 		}
+		if updateErr := r.updateStatus(ctx, mapping, wazuhv1.OpenSearchResourcePhaseFailed, fmt.Sprintf("Failed to %s role mapping: %v", action, err)); updateErr != nil {
+			log.Error(updateErr, "Failed to update status")
+		}
+		return fmt.Errorf("failed to %s role mapping: %w", action, err)
 	}
 
 	// Update status
-	if err := r.updateStatus(ctx, mapping, "Ready", "Role mapping reconciled successfully"); err != nil {
+	if err := r.updateStatus(ctx, mapping, wazuhv1.OpenSearchResourcePhaseReady, "Role mapping reconciled successfully"); err != nil {
 		return fmt.Errorf("failed to update status: %w", err)
 	}
 
@@ -110,13 +130,25 @@ func (r *RoleMappingReconciler) buildRoleMapping(mapping *wazuhv1.OpenSearchRole
 }
 
 // updateStatus updates the role mapping status
-func (r *RoleMappingReconciler) updateStatus(ctx context.Context, mapping *wazuhv1.OpenSearchRoleMapping, phase, message string) error {
+func (r *RoleMappingReconciler) updateStatus(ctx context.Context, mapping *wazuhv1.OpenSearchRoleMapping, phase wazuhv1.OpenSearchResourcePhase, message string) error {
 	mapping.Status.Phase = phase
 	mapping.Status.Message = message
 	now := metav1.Now()
 	mapping.Status.LastSyncTime = &now
 
 	return r.Status().Update(ctx, mapping)
+}
+
+// handleDeletion handles role mapping cleanup on deletion
+func (r *RoleMappingReconciler) handleDeletion(ctx context.Context, mapping *wazuhv1.OpenSearchRoleMapping) error {
+	log := logf.FromContext(ctx)
+
+	if err := r.Delete(ctx, mapping); err != nil {
+		log.Error(err, "Failed to delete role mapping from OpenSearch, proceeding with finalizer removal")
+	}
+
+	controllerutil.RemoveFinalizer(mapping, constants.RoleMappingFinalizer)
+	return r.Update(ctx, mapping)
 }
 
 // Delete handles cleanup when a role mapping is deleted

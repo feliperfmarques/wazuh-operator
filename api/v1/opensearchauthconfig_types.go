@@ -106,11 +106,11 @@ type OIDCAuthSpec struct {
 	// ConnectURL is the OpenID Connect discovery endpoint URL
 	// Example: https://keycloak.example.com/realms/wazuh/.well-known/openid-configuration
 	// +kubebuilder:validation:Required
-	ConnectURL string `json:"connectURL,omitempty"`
+	ConnectURL string `json:"connectURL"`
 
 	// ClientID is the OAuth 2.0 client ID
 	// +kubebuilder:validation:Required
-	ClientID string `json:"clientId,omitempty"`
+	ClientID string `json:"clientId"`
 
 	// ClientSecretRef references a Secret containing the client secret
 	// +optional
@@ -202,17 +202,17 @@ type SAMLAuthSpec struct {
 
 	// IdpEntityID is the entity ID of the Identity Provider
 	// +kubebuilder:validation:Required
-	IdpEntityID string `json:"idpEntityId,omitempty"`
+	IdpEntityID string `json:"idpEntityId"`
 
 	// SpEntityID is the entity ID of this Service Provider
 	// Usually the Kibana/Dashboard URL
 	// +kubebuilder:validation:Required
-	SpEntityID string `json:"spEntityId,omitempty"`
+	SpEntityID string `json:"spEntityId"`
 
 	// KibanaURL is the base URL of OpenSearch Dashboard
 	// Used for assertion consumer service URL
 	// +kubebuilder:validation:Required
-	KibanaURL string `json:"kibanaUrl,omitempty"`
+	KibanaURL string `json:"kibanaUrl"`
 
 	// SubjectKey is the SAML attribute to use as the username
 	// +kubebuilder:default="NameID"
@@ -308,7 +308,7 @@ type LDAPAuthenticationSpec struct {
 	// UserBase is the base DN for user searches
 	// Example: ou=users,dc=example,dc=com
 	// +kubebuilder:validation:Required
-	UserBase string `json:"userBase,omitempty"`
+	UserBase string `json:"userBase"`
 
 	// UserSearch is the LDAP filter for finding users
 	// Example: (uid={0}) or (sAMAccountName={0}) for AD
@@ -329,7 +329,7 @@ type LDAPAuthorizationSpec struct {
 	// RoleBase is the base DN for role searches
 	// Example: ou=groups,dc=example,dc=com
 	// +kubebuilder:validation:Required
-	RoleBase string `json:"roleBase,omitempty"`
+	RoleBase string `json:"roleBase"`
 
 	// RoleSearch is the LDAP filter for finding roles
 	// Example: (member={0}) or (memberUid={1})
@@ -398,13 +398,15 @@ type LDAPConnectionPoolSpec struct {
 type OpenSearchAuthConfigStatus struct {
 	// Phase is the current phase (Pending, Ready, Failed)
 	// +optional
-	Phase string `json:"phase,omitempty"`
+	Phase OpenSearchResourcePhase `json:"phase,omitempty"`
 
 	// Message provides additional information about the current phase
 	// +optional
 	Message string `json:"message,omitempty"`
 
 	// Conditions represent the latest available observations
+	// +listType=map
+	// +listMapKey=type
 	// +optional
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
 

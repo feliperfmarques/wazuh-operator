@@ -109,6 +109,11 @@ type IndexerNodePoolSpec struct {
 	// +kubebuilder:pruning:PreserveUnknownFields
 	Affinity *corev1.Affinity `json:"affinity,omitempty"`
 
+	// Topology spread constraints for pod scheduling
+	// +optional
+	// +kubebuilder:pruning:PreserveUnknownFields
+	TopologySpreadConstraints []corev1.TopologySpreadConstraint `json:"topologySpreadConstraints,omitempty"`
+
 	// PodDisruptionBudget configuration for this pool
 	// +optional
 	PodDisruptionBudget *PodDisruptionBudgetSpec `json:"podDisruptionBudget,omitempty"`
@@ -135,7 +140,7 @@ type NodePoolStatus struct {
 
 	// Phase indicates the nodePool state
 	// +kubebuilder:validation:Enum=Pending;Creating;Running;Scaling;Draining;Failed
-	Phase string `json:"phase,omitempty"`
+	Phase NodePoolPhase `json:"phase,omitempty"`
 
 	// Message provides additional status information
 	// +optional
@@ -149,16 +154,6 @@ type NodePoolStatus struct {
 	// +optional
 	LastTransitionTime *metav1.Time `json:"lastTransitionTime,omitempty"`
 }
-
-// NodePool phase constants
-const (
-	NodePoolPhasePending  = "Pending"
-	NodePoolPhaseCreating = "Creating"
-	NodePoolPhaseRunning  = "Running"
-	NodePoolPhaseScaling  = "Scaling"
-	NodePoolPhaseDraining = "Draining"
-	NodePoolPhaseFailed   = "Failed"
-)
 
 // GetRolesAsStrings returns the roles as a slice of strings
 func (p *IndexerNodePoolSpec) GetRolesAsStrings() []string {

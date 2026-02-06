@@ -30,30 +30,34 @@ import (
 
 // WorkerStatefulSetBuilder builds a StatefulSet for Wazuh Manager Worker nodes
 type WorkerStatefulSetBuilder struct {
-	name             string
-	namespace        string
-	clusterName      string
-	version          string
-	replicas         int32
-	storageSize      string
-	storageClassName *string
-	resources        *corev1.ResourceRequirements
-	image            string
-	nodeSelector     map[string]string
-	tolerations      []corev1.Toleration
-	affinity         *corev1.Affinity
-	labels           map[string]string
-	annotations      map[string]string
-	podAnnotations   map[string]string
-	env              []corev1.EnvVar
-	envFrom          []corev1.EnvFromSource
-	volumes          []corev1.Volume
-	volumeMounts     []corev1.VolumeMount
-	masterAddress    string
+	name                      string
+	namespace                 string
+	clusterName               string
+	version                   string
+	replicas                  int32
+	storageSize               string
+	storageClassName          *string
+	resources                 *corev1.ResourceRequirements
+	image                     string
+	nodeSelector              map[string]string
+	tolerations               []corev1.Toleration
+	affinity                  *corev1.Affinity
+	imagePullSecrets          []corev1.LocalObjectReference
+	topologySpreadConstraints []corev1.TopologySpreadConstraint
+	labels                    map[string]string
+	annotations               map[string]string
+	podAnnotations            map[string]string
+	env                       []corev1.EnvVar
+	envFrom                   []corev1.EnvFromSource
+	volumes                   []corev1.Volume
+	volumeMounts              []corev1.VolumeMount
+	masterAddress             string
 	// Rule ConfigMaps to mount
 	ruleConfigMaps []RuleConfigMapRef
 	// Decoder ConfigMaps to mount
 	decoderConfigMaps []DecoderConfigMapRef
+	// Termination grace period
+	terminationGracePeriodSeconds *int64
 }
 
 // NewWorkerStatefulSetBuilder creates a new WorkerStatefulSetBuilder
@@ -124,6 +128,18 @@ func (b *WorkerStatefulSetBuilder) WithTolerations(tolerations []corev1.Tolerati
 // WithAffinity sets the affinity
 func (b *WorkerStatefulSetBuilder) WithAffinity(affinity *corev1.Affinity) *WorkerStatefulSetBuilder {
 	b.affinity = affinity
+	return b
+}
+
+// WithImagePullSecrets sets the image pull secrets
+func (b *WorkerStatefulSetBuilder) WithImagePullSecrets(secrets []corev1.LocalObjectReference) *WorkerStatefulSetBuilder {
+	b.imagePullSecrets = secrets
+	return b
+}
+
+// WithTopologySpreadConstraints sets the topology spread constraints
+func (b *WorkerStatefulSetBuilder) WithTopologySpreadConstraints(constraints []corev1.TopologySpreadConstraint) *WorkerStatefulSetBuilder {
+	b.topologySpreadConstraints = constraints
 	return b
 }
 
@@ -252,6 +268,12 @@ func (b *WorkerStatefulSetBuilder) WithDecoderHash(hash string) *WorkerStatefulS
 	return b
 }
 
+// WithTerminationGracePeriodSeconds sets the termination grace period for pods
+func (b *WorkerStatefulSetBuilder) WithTerminationGracePeriodSeconds(seconds *int64) *WorkerStatefulSetBuilder {
+	b.terminationGracePeriodSeconds = seconds
+	return b
+}
+
 // Build creates the StatefulSet
 func (b *WorkerStatefulSetBuilder) Build() *appsv1.StatefulSet {
 	labels := b.buildLabels()
@@ -330,9 +352,12 @@ func (b *WorkerStatefulSetBuilder) Build() *appsv1.StatefulSet {
 					Annotations: b.podAnnotations,
 				},
 				Spec: corev1.PodSpec{
-					NodeSelector: b.nodeSelector,
-					Tolerations:  b.tolerations,
-					Affinity:     b.affinity,
+					TerminationGracePeriodSeconds: b.terminationGracePeriodSeconds,
+					NodeSelector:                  b.nodeSelector,
+					Tolerations:                   b.tolerations,
+					Affinity:                      b.affinity,
+					ImagePullSecrets:              b.imagePullSecrets,
+					TopologySpreadConstraints:     b.topologySpreadConstraints,
 					// SecurityContext at pod level - fsGroup 999 is the wazuh group in the official image
 					// SeccompProfile Unconfined is needed on some environments (WSL2, certain kernels)
 					// to allow Filebeat's Go runtime to create threads (pthread_create)
@@ -358,10 +383,10 @@ func (b *WorkerStatefulSetBuilder) Build() *appsv1.StatefulSet {
 								},
 							},
 							Ports: []corev1.ContainerPort{
-								{Name: "registration", ContainerPort: constants.PortManagerRegistration, Protocol: corev1.ProtocolTCP},
+								{Name: "registration", ContainerPort: constants.PortManagerAgentAuth, Protocol: corev1.ProtocolTCP},
 								{Name: "cluster", ContainerPort: constants.PortManagerCluster, Protocol: corev1.ProtocolTCP},
 								{Name: "api", ContainerPort: constants.PortManagerAPI, Protocol: corev1.ProtocolTCP},
-								{Name: "agents", ContainerPort: constants.PortManagerAgents, Protocol: corev1.ProtocolTCP},
+								{Name: "agents", ContainerPort: constants.PortManagerAgentEvents, Protocol: corev1.ProtocolTCP},
 							},
 							Env:          env,
 							EnvFrom:      b.envFrom,
@@ -454,7 +479,9 @@ func (b *WorkerStatefulSetBuilder) buildVolumes() []corev1.Volume {
 		{
 			Name: constants.VolumeNameWazuhConfigMount,
 			VolumeSource: corev1.VolumeSource{
-				EmptyDir: &corev1.EmptyDirVolumeSource{},
+				EmptyDir: &corev1.EmptyDirVolumeSource{
+					SizeLimit: func() *resource.Quantity { q := resource.MustParse("10Mi"); return &q }(),
+				},
 			},
 		},
 		{

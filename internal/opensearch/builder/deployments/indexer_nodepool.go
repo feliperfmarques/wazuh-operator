@@ -33,29 +33,33 @@ import (
 // NodePoolStatefulSetBuilder builds a StatefulSet for an OpenSearch nodePool
 // This is used in advanced topology mode where each nodePool has dedicated roles
 type NodePoolStatefulSetBuilder struct {
-	clusterName      string
-	namespace        string
-	poolName         string
-	version          string
-	replicas         int32
-	roles            []string
-	storageSize      string
-	storageClassName *string
-	resources        *corev1.ResourceRequirements
-	image            string
-	nodeSelector     map[string]string
-	tolerations      []corev1.Toleration
-	affinity         *corev1.Affinity
-	labels           map[string]string
-	annotations      map[string]string
-	podAnnotations   map[string]string
-	env              []corev1.EnvVar
-	envFrom          []corev1.EnvFromSource
-	volumes          []corev1.Volume
-	volumeMounts     []corev1.VolumeMount
-	javaOpts         string
+	clusterName               string
+	namespace                 string
+	poolName                  string
+	version                   string
+	replicas                  int32
+	roles                     []string
+	storageSize               string
+	storageClassName          *string
+	resources                 *corev1.ResourceRequirements
+	image                     string
+	nodeSelector              map[string]string
+	tolerations               []corev1.Toleration
+	affinity                  *corev1.Affinity
+	imagePullSecrets          []corev1.LocalObjectReference
+	topologySpreadConstraints []corev1.TopologySpreadConstraint
+	labels                    map[string]string
+	annotations               map[string]string
+	podAnnotations            map[string]string
+	env                       []corev1.EnvVar
+	envFrom                   []corev1.EnvFromSource
+	volumes                   []corev1.Volume
+	volumeMounts              []corev1.VolumeMount
+	javaOpts                  string
 	// Monitoring configuration
 	cluster *wazuhv1.WazuhCluster
+	// Termination grace period
+	terminationGracePeriodSeconds *int64
 }
 
 // NewNodePoolStatefulSetBuilder creates a new NodePoolStatefulSetBuilder
@@ -130,6 +134,18 @@ func (b *NodePoolStatefulSetBuilder) WithTolerations(tolerations []corev1.Tolera
 // WithAffinity sets the affinity
 func (b *NodePoolStatefulSetBuilder) WithAffinity(affinity *corev1.Affinity) *NodePoolStatefulSetBuilder {
 	b.affinity = affinity
+	return b
+}
+
+// WithImagePullSecrets sets the image pull secrets
+func (b *NodePoolStatefulSetBuilder) WithImagePullSecrets(secrets []corev1.LocalObjectReference) *NodePoolStatefulSetBuilder {
+	b.imagePullSecrets = secrets
+	return b
+}
+
+// WithTopologySpreadConstraints sets the topology spread constraints
+func (b *NodePoolStatefulSetBuilder) WithTopologySpreadConstraints(constraints []corev1.TopologySpreadConstraint) *NodePoolStatefulSetBuilder {
+	b.topologySpreadConstraints = constraints
 	return b
 }
 
@@ -221,6 +237,12 @@ func (b *NodePoolStatefulSetBuilder) WithCluster(cluster *wazuhv1.WazuhCluster) 
 	return b
 }
 
+// WithTerminationGracePeriodSeconds sets the termination grace period for pods
+func (b *NodePoolStatefulSetBuilder) WithTerminationGracePeriodSeconds(seconds *int64) *NodePoolStatefulSetBuilder {
+	b.terminationGracePeriodSeconds = seconds
+	return b
+}
+
 // Build creates the StatefulSet for this nodePool
 func (b *NodePoolStatefulSetBuilder) Build() *appsv1.StatefulSet {
 	name := constants.IndexerNodePoolName(b.clusterName, b.poolName)
@@ -297,9 +319,12 @@ func (b *NodePoolStatefulSetBuilder) Build() *appsv1.StatefulSet {
 					Annotations: b.podAnnotations,
 				},
 				Spec: corev1.PodSpec{
-					NodeSelector: b.nodeSelector,
-					Tolerations:  b.tolerations,
-					Affinity:     b.affinity,
+					TerminationGracePeriodSeconds: b.terminationGracePeriodSeconds,
+					NodeSelector:                  b.nodeSelector,
+					Tolerations:                   b.tolerations,
+					Affinity:                      b.affinity,
+					ImagePullSecrets:              b.imagePullSecrets,
+					TopologySpreadConstraints:     b.topologySpreadConstraints,
 					SecurityContext: &corev1.PodSecurityContext{
 						FSGroup:   &fsGroup,
 						RunAsUser: &runAsUser,
@@ -442,7 +467,9 @@ func (b *NodePoolStatefulSetBuilder) buildVolumes(configMapName string) []corev1
 		{
 			Name: constants.VolumeNameConfigProcessed,
 			VolumeSource: corev1.VolumeSource{
-				EmptyDir: &corev1.EmptyDirVolumeSource{},
+				EmptyDir: &corev1.EmptyDirVolumeSource{
+					SizeLimit: func() *resource.Quantity { q := resource.MustParse("10Mi"); return &q }(),
+				},
 			},
 		},
 	}

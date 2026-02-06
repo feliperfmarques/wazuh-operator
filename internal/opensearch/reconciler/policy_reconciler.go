@@ -23,11 +23,13 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	wazuhv1 "github.com/MaximeWewer/wazuh-operator/api/v1"
 	"github.com/MaximeWewer/wazuh-operator/internal/opensearch/api"
 	"github.com/MaximeWewer/wazuh-operator/internal/opensearch/security"
+	"github.com/MaximeWewer/wazuh-operator/pkg/constants"
 )
 
 // PolicyReconciler handles reconciliation of OpenSearch ISM policies
@@ -55,8 +57,21 @@ func (r *PolicyReconciler) WithClientFactory(factory *security.OpenSearchClientF
 func (r *PolicyReconciler) Reconcile(ctx context.Context, policy *wazuhv1.OpenSearchISMPolicy) error {
 	log := logf.FromContext(ctx)
 
+	// Handle finalizer
+	if !controllerutil.ContainsFinalizer(policy, constants.ISMPolicyFinalizer) {
+		controllerutil.AddFinalizer(policy, constants.ISMPolicyFinalizer)
+		if err := r.Update(ctx, policy); err != nil {
+			return fmt.Errorf("failed to add finalizer: %w", err)
+		}
+	}
+
+	// Check if being deleted
+	if !policy.DeletionTimestamp.IsZero() {
+		return r.handleDeletion(ctx, policy)
+	}
+
 	if r.ClientFactory == nil {
-		return r.updateStatus(ctx, policy, "Pending", "Waiting for OpenSearch client factory")
+		return r.updateStatus(ctx, policy, wazuhv1.OpenSearchResourcePhasePending, "Waiting for OpenSearch client factory")
 	}
 
 	apiClient, err := r.ClientFactory.GetClientForRef(ctx, policy.Spec.ClusterRef, policy.Namespace)
@@ -70,7 +85,7 @@ func (r *PolicyReconciler) Reconcile(ctx context.Context, policy *wazuhv1.OpenSe
 	// Check if policy exists
 	exists, err := ismAPI.Exists(ctx, policy.Name)
 	if err != nil {
-		if updateErr := r.updateStatus(ctx, policy, "Error", fmt.Sprintf("Failed to check policy existence: %v", err)); updateErr != nil {
+		if updateErr := r.updateStatus(ctx, policy, wazuhv1.OpenSearchResourcePhaseFailed, fmt.Sprintf("Failed to check policy existence: %v", err)); updateErr != nil {
 			log.Error(updateErr, "Failed to update status")
 		}
 		return fmt.Errorf("failed to check policy existence: %w", err)
@@ -80,18 +95,23 @@ func (r *PolicyReconciler) Reconcile(ctx context.Context, policy *wazuhv1.OpenSe
 	ismPolicy := r.buildISMPolicy(policy)
 
 	if !exists {
-		// Create new policy
 		log.Info("Creating ISM policy", "name", policy.Name)
-		if err := ismAPI.Create(ctx, policy.Name, ismPolicy); err != nil {
-			if updateErr := r.updateStatus(ctx, policy, "Error", fmt.Sprintf("Failed to create policy: %v", err)); updateErr != nil {
-				log.Error(updateErr, "Failed to update status")
-			}
-			return fmt.Errorf("failed to create ISM policy: %w", err)
+	} else {
+		log.Info("Updating ISM policy", "name", policy.Name)
+	}
+	if err := ismAPI.Create(ctx, policy.Name, ismPolicy); err != nil {
+		action := "create"
+		if exists {
+			action = "update"
 		}
+		if updateErr := r.updateStatus(ctx, policy, wazuhv1.OpenSearchResourcePhaseFailed, fmt.Sprintf("Failed to %s ISM policy: %v", action, err)); updateErr != nil {
+			log.Error(updateErr, "Failed to update status")
+		}
+		return fmt.Errorf("failed to %s ISM policy: %w", action, err)
 	}
 
 	// Update status
-	if err := r.updateStatus(ctx, policy, "Ready", "ISM policy reconciled successfully"); err != nil {
+	if err := r.updateStatus(ctx, policy, wazuhv1.OpenSearchResourcePhaseReady, "ISM policy reconciled successfully"); err != nil {
 		return fmt.Errorf("failed to update status: %w", err)
 	}
 
@@ -156,13 +176,25 @@ func (r *PolicyReconciler) buildISMPolicy(policy *wazuhv1.OpenSearchISMPolicy) a
 }
 
 // updateStatus updates the policy status
-func (r *PolicyReconciler) updateStatus(ctx context.Context, policy *wazuhv1.OpenSearchISMPolicy, phase, message string) error {
+func (r *PolicyReconciler) updateStatus(ctx context.Context, policy *wazuhv1.OpenSearchISMPolicy, phase wazuhv1.OpenSearchResourcePhase, message string) error {
 	policy.Status.Phase = phase
 	policy.Status.Message = message
 	now := metav1.Now()
 	policy.Status.LastSyncTime = &now
 
 	return r.Status().Update(ctx, policy)
+}
+
+// handleDeletion handles ISM policy cleanup on deletion
+func (r *PolicyReconciler) handleDeletion(ctx context.Context, policy *wazuhv1.OpenSearchISMPolicy) error {
+	log := logf.FromContext(ctx)
+
+	if err := r.Delete(ctx, policy); err != nil {
+		log.Error(err, "Failed to delete ISM policy from OpenSearch, proceeding with finalizer removal")
+	}
+
+	controllerutil.RemoveFinalizer(policy, constants.ISMPolicyFinalizer)
+	return r.Update(ctx, policy)
 }
 
 // Delete handles cleanup when a policy is deleted

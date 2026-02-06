@@ -82,6 +82,8 @@ type WazuhManagerStatus struct {
 	Phase ComponentPhase `json:"phase,omitempty"`
 
 	// Conditions represent the latest available observations
+	// +listType=map
+	// +listMapKey=type
 	// +optional
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
 
@@ -122,7 +124,7 @@ type NodeStatus struct {
 
 	// Phase
 	// +optional
-	Phase string `json:"phase,omitempty"`
+	Phase ComponentStatusPhase `json:"phase,omitempty"`
 }
 
 // ComponentPhase represents the phase of a component

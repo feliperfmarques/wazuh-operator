@@ -23,11 +23,13 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	wazuhv1 "github.com/MaximeWewer/wazuh-operator/api/v1"
 	"github.com/MaximeWewer/wazuh-operator/internal/opensearch/api"
 	"github.com/MaximeWewer/wazuh-operator/internal/opensearch/security"
+	"github.com/MaximeWewer/wazuh-operator/pkg/constants"
 )
 
 // TenantReconciler handles reconciliation of OpenSearch tenants
@@ -55,8 +57,21 @@ func (r *TenantReconciler) WithClientFactory(factory *security.OpenSearchClientF
 func (r *TenantReconciler) Reconcile(ctx context.Context, tenant *wazuhv1.OpenSearchTenant) error {
 	log := logf.FromContext(ctx)
 
+	// Handle finalizer
+	if !controllerutil.ContainsFinalizer(tenant, constants.TenantFinalizer) {
+		controllerutil.AddFinalizer(tenant, constants.TenantFinalizer)
+		if err := r.Update(ctx, tenant); err != nil {
+			return fmt.Errorf("failed to add finalizer: %w", err)
+		}
+	}
+
+	// Check if being deleted
+	if !tenant.DeletionTimestamp.IsZero() {
+		return r.handleDeletion(ctx, tenant)
+	}
+
 	if r.ClientFactory == nil {
-		return r.updateStatus(ctx, tenant, "Pending", "Waiting for OpenSearch client factory")
+		return r.updateStatus(ctx, tenant, wazuhv1.OpenSearchResourcePhasePending, "Waiting for OpenSearch client factory")
 	}
 
 	// Get OpenSearch client dynamically from cluster reference
@@ -71,7 +86,7 @@ func (r *TenantReconciler) Reconcile(ctx context.Context, tenant *wazuhv1.OpenSe
 	// Check if tenant exists
 	existing, err := securityAPI.GetTenant(ctx, tenant.Name)
 	if err != nil {
-		if updateErr := r.updateStatus(ctx, tenant, "Error", fmt.Sprintf("Failed to check tenant existence: %v", err)); updateErr != nil {
+		if updateErr := r.updateStatus(ctx, tenant, wazuhv1.OpenSearchResourcePhaseFailed, fmt.Sprintf("Failed to check tenant existence: %v", err)); updateErr != nil {
 			log.Error(updateErr, "Failed to update status")
 		}
 		return fmt.Errorf("failed to check tenant existence: %w", err)
@@ -81,18 +96,23 @@ func (r *TenantReconciler) Reconcile(ctx context.Context, tenant *wazuhv1.OpenSe
 	osTenant := r.buildTenant(tenant)
 
 	if existing == nil {
-		// Create new tenant
 		log.Info("Creating tenant", "name", tenant.Name)
-		if err := securityAPI.CreateTenant(ctx, tenant.Name, osTenant); err != nil {
-			if updateErr := r.updateStatus(ctx, tenant, "Error", fmt.Sprintf("Failed to create tenant: %v", err)); updateErr != nil {
-				log.Error(updateErr, "Failed to update status")
-			}
-			return fmt.Errorf("failed to create tenant: %w", err)
+	} else {
+		log.Info("Updating tenant", "name", tenant.Name)
+	}
+	if err := securityAPI.CreateTenant(ctx, tenant.Name, osTenant); err != nil {
+		action := "create"
+		if existing != nil {
+			action = "update"
 		}
+		if updateErr := r.updateStatus(ctx, tenant, wazuhv1.OpenSearchResourcePhaseFailed, fmt.Sprintf("Failed to %s tenant: %v", action, err)); updateErr != nil {
+			log.Error(updateErr, "Failed to update status")
+		}
+		return fmt.Errorf("failed to %s tenant: %w", action, err)
 	}
 
 	// Update status
-	if err := r.updateStatus(ctx, tenant, "Ready", "Tenant reconciled successfully"); err != nil {
+	if err := r.updateStatus(ctx, tenant, wazuhv1.OpenSearchResourcePhaseReady, "Tenant reconciled successfully"); err != nil {
 		return fmt.Errorf("failed to update status: %w", err)
 	}
 
@@ -108,13 +128,25 @@ func (r *TenantReconciler) buildTenant(tenant *wazuhv1.OpenSearchTenant) api.Ten
 }
 
 // updateStatus updates the tenant status
-func (r *TenantReconciler) updateStatus(ctx context.Context, tenant *wazuhv1.OpenSearchTenant, phase, message string) error {
+func (r *TenantReconciler) updateStatus(ctx context.Context, tenant *wazuhv1.OpenSearchTenant, phase wazuhv1.OpenSearchResourcePhase, message string) error {
 	tenant.Status.Phase = phase
 	tenant.Status.Message = message
 	now := metav1.Now()
 	tenant.Status.LastSyncTime = &now
 
 	return r.Status().Update(ctx, tenant)
+}
+
+// handleDeletion handles tenant cleanup on deletion
+func (r *TenantReconciler) handleDeletion(ctx context.Context, tenant *wazuhv1.OpenSearchTenant) error {
+	log := logf.FromContext(ctx)
+
+	if err := r.Delete(ctx, tenant); err != nil {
+		log.Error(err, "Failed to delete tenant from OpenSearch, proceeding with finalizer removal")
+	}
+
+	controllerutil.RemoveFinalizer(tenant, constants.TenantFinalizer)
+	return r.Update(ctx, tenant)
 }
 
 // Delete handles cleanup when a tenant is deleted

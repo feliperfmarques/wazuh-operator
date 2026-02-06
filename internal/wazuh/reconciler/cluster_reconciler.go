@@ -309,21 +309,23 @@ func (r *ClusterReconciler) reconcileMasterNonBlocking(ctx context.Context, clus
 
 	// Extract master spec fields with defaults
 	var (
-		version           = cluster.Spec.Version
-		resources         *corev1.ResourceRequirements
-		storageSize       = constants.DefaultManagerStorageSize
-		nodeSelector      map[string]string
-		tolerations       []corev1.Toleration
-		affinity          *corev1.Affinity
-		extraVolumes      []corev1.Volume
-		extraVolumeMounts []corev1.VolumeMount
-		extraConfig       string
-		annotations       map[string]string
-		podAnnotations    map[string]string
+		version                   = cluster.Spec.Version
+		resources                 *corev1.ResourceRequirements
+		storageSize               = constants.DefaultManagerStorageSize
+		nodeSelector              map[string]string
+		tolerations               []corev1.Toleration
+		affinity                  *corev1.Affinity
+		topologySpreadConstraints []corev1.TopologySpreadConstraint
+		extraVolumes              []corev1.Volume
+		extraVolumeMounts         []corev1.VolumeMount
+		extraConfig               string
+		annotations               map[string]string
+		podAnnotations            map[string]string
 	)
 
 	var env []corev1.EnvVar
 	var envFrom []corev1.EnvFromSource
+	imagePullSecrets := cluster.Spec.ImagePullSecrets
 
 	if cluster.Spec.Manager != nil {
 		if cluster.Spec.Manager.Master.Resources != nil {
@@ -335,6 +337,7 @@ func (r *ClusterReconciler) reconcileMasterNonBlocking(ctx context.Context, clus
 		nodeSelector = cluster.Spec.Manager.Master.NodeSelector
 		tolerations = cluster.Spec.Manager.Master.Tolerations
 		affinity = cluster.Spec.Manager.Master.Affinity
+		topologySpreadConstraints = cluster.Spec.Manager.Master.TopologySpreadConstraints
 		env = cluster.Spec.Manager.Master.Env
 		envFrom = cluster.Spec.Manager.Master.EnvFrom
 		extraVolumes = cluster.Spec.Manager.Master.ExtraVolumes
@@ -423,20 +426,22 @@ func (r *ClusterReconciler) reconcileMasterNonBlocking(ctx context.Context, clus
 
 	// Compute specHash for change detection (version is included in image tag)
 	specHash, err := patch.ComputeManagerMasterSpecHashFull(patch.ManagerMasterSpecInput{
-		Version:           version,
-		Resources:         resources,
-		StorageSize:       storageSize,
-		NodeSelector:      nodeSelector,
-		Tolerations:       tolerations,
-		Affinity:          affinity,
-		Env:               env,
-		EnvFrom:           envFrom,
-		Annotations:       annotations,
-		PodAnnotations:    podAnnotations,
-		ExtraConfig:       extraConfig,
-		ExtraVolumes:      extraVolumes,
-		ExtraVolumeMounts: extraVolumeMounts,
-		MonitoringEnabled: cluster.Spec.Monitoring != nil && cluster.Spec.Monitoring.Enabled,
+		Version:                   version,
+		Resources:                 resources,
+		StorageSize:               storageSize,
+		NodeSelector:              nodeSelector,
+		Tolerations:               tolerations,
+		Affinity:                  affinity,
+		ImagePullSecrets:          imagePullSecrets,
+		TopologySpreadConstraints: topologySpreadConstraints,
+		Env:                       env,
+		EnvFrom:                   envFrom,
+		Annotations:               annotations,
+		PodAnnotations:            podAnnotations,
+		ExtraConfig:               extraConfig,
+		ExtraVolumes:              extraVolumes,
+		ExtraVolumeMounts:         extraVolumeMounts,
+		MonitoringEnabled:         cluster.Spec.Monitoring != nil && cluster.Spec.Monitoring.Enabled,
 	})
 	if err != nil {
 		log.Error(err, "Failed to compute master spec hash, continuing without spec hash")
@@ -462,6 +467,12 @@ func (r *ClusterReconciler) reconcileMasterNonBlocking(ctx context.Context, clus
 	}
 	if affinity != nil {
 		stsBuilder.WithAffinity(affinity)
+	}
+	if len(topologySpreadConstraints) > 0 {
+		stsBuilder.WithTopologySpreadConstraints(topologySpreadConstraints)
+	}
+	if len(imagePullSecrets) > 0 {
+		stsBuilder.WithImagePullSecrets(imagePullSecrets)
 	}
 	if len(env) > 0 {
 		stsBuilder.WithEnv(env)
@@ -492,6 +503,12 @@ func (r *ClusterReconciler) reconcileMasterNonBlocking(ctx context.Context, clus
 	}
 	// Set cluster reference for monitoring sidecar
 	stsBuilder.WithCluster(cluster)
+	// Set termination grace period (default + user override)
+	masterTerminationGracePeriod := constants.DefaultManagerTerminationGracePeriod
+	if cluster.Spec.Manager != nil && cluster.Spec.Manager.Master.TerminationGracePeriodSeconds != nil {
+		masterTerminationGracePeriod = *cluster.Spec.Manager.Master.TerminationGracePeriodSeconds
+	}
+	stsBuilder.WithTerminationGracePeriodSeconds(&masterTerminationGracePeriod)
 
 	// Mount rule ConfigMaps if RuleReconciler is configured
 	var ruleHash string
@@ -680,19 +697,21 @@ func (r *ClusterReconciler) reconcileWorkersNonBlocking(ctx context.Context, clu
 
 	// Extract worker spec fields with defaults
 	var (
-		replicas          int32
-		version           = cluster.Spec.Version
-		resources         *corev1.ResourceRequirements
-		storageSize       = constants.DefaultManagerStorageSize
-		nodeSelector      map[string]string
-		tolerations       []corev1.Toleration
-		affinity          *corev1.Affinity
-		extraVolumes      []corev1.Volume
-		extraVolumeMounts []corev1.VolumeMount
-		extraConfig       string
-		annotations       map[string]string
-		podAnnotations    map[string]string
+		replicas                  int32
+		version                   = cluster.Spec.Version
+		resources                 *corev1.ResourceRequirements
+		storageSize               = constants.DefaultManagerStorageSize
+		nodeSelector              map[string]string
+		tolerations               []corev1.Toleration
+		affinity                  *corev1.Affinity
+		topologySpreadConstraints []corev1.TopologySpreadConstraint
+		extraVolumes              []corev1.Volume
+		extraVolumeMounts         []corev1.VolumeMount
+		extraConfig               string
+		annotations               map[string]string
+		podAnnotations            map[string]string
 	)
+	workerImagePullSecrets := cluster.Spec.ImagePullSecrets
 
 	if cluster.Spec.Manager != nil {
 		replicas = cluster.Spec.Manager.Workers.GetReplicas()
@@ -705,6 +724,7 @@ func (r *ClusterReconciler) reconcileWorkersNonBlocking(ctx context.Context, clu
 		nodeSelector = cluster.Spec.Manager.Workers.NodeSelector
 		tolerations = cluster.Spec.Manager.Workers.Tolerations
 		affinity = cluster.Spec.Manager.Workers.Affinity
+		topologySpreadConstraints = cluster.Spec.Manager.Workers.TopologySpreadConstraints
 		extraVolumes = cluster.Spec.Manager.Workers.ExtraVolumes
 		extraVolumeMounts = cluster.Spec.Manager.Workers.ExtraVolumeMounts
 		extraConfig = cluster.Spec.Manager.Workers.ExtraConfig
@@ -808,20 +828,22 @@ func (r *ClusterReconciler) reconcileWorkersNonBlocking(ctx context.Context, clu
 
 	// Compute specHash for change detection (version is included in image tag)
 	specHash, err := patch.ComputeManagerWorkersSpecHashFull(patch.ManagerWorkersSpecInput{
-		Replicas:          replicas,
-		Version:           version,
-		Resources:         resources,
-		StorageSize:       storageSize,
-		NodeSelector:      nodeSelector,
-		Tolerations:       tolerations,
-		Affinity:          affinity,
-		Env:               workerEnv,
-		EnvFrom:           workerEnvFrom,
-		Annotations:       annotations,
-		PodAnnotations:    workerPodAnnotations,
-		ExtraConfig:       workerExtraConfig,
-		ExtraVolumes:      workerExtraVolumes,
-		ExtraVolumeMounts: workerExtraVolumeMounts,
+		Replicas:                  replicas,
+		Version:                   version,
+		Resources:                 resources,
+		StorageSize:               storageSize,
+		NodeSelector:              nodeSelector,
+		Tolerations:               tolerations,
+		Affinity:                  affinity,
+		ImagePullSecrets:          workerImagePullSecrets,
+		TopologySpreadConstraints: topologySpreadConstraints,
+		Env:                       workerEnv,
+		EnvFrom:                   workerEnvFrom,
+		Annotations:               annotations,
+		PodAnnotations:            workerPodAnnotations,
+		ExtraConfig:               workerExtraConfig,
+		ExtraVolumes:              workerExtraVolumes,
+		ExtraVolumeMounts:         workerExtraVolumeMounts,
 	})
 	if err != nil {
 		log.Error(err, "Failed to compute worker spec hash, continuing without spec hash")
@@ -849,6 +871,12 @@ func (r *ClusterReconciler) reconcileWorkersNonBlocking(ctx context.Context, clu
 	if affinity != nil {
 		stsBuilder.WithAffinity(affinity)
 	}
+	if len(topologySpreadConstraints) > 0 {
+		stsBuilder.WithTopologySpreadConstraints(topologySpreadConstraints)
+	}
+	if len(workerImagePullSecrets) > 0 {
+		stsBuilder.WithImagePullSecrets(workerImagePullSecrets)
+	}
 	if len(extraVolumes) > 0 {
 		stsBuilder.WithVolumes(extraVolumes)
 	}
@@ -870,6 +898,13 @@ func (r *ClusterReconciler) reconcileWorkersNonBlocking(ctx context.Context, clu
 	if specHash != "" {
 		stsBuilder.WithSpecHash(specHash)
 	}
+
+	// Set termination grace period (default + user override)
+	workerTerminationGracePeriod := constants.DefaultManagerTerminationGracePeriod
+	if cluster.Spec.Manager != nil && cluster.Spec.Manager.Workers.TerminationGracePeriodSeconds != nil {
+		workerTerminationGracePeriod = *cluster.Spec.Manager.Workers.TerminationGracePeriodSeconds
+	}
+	stsBuilder.WithTerminationGracePeriodSeconds(&workerTerminationGracePeriod)
 
 	// Mount rule ConfigMaps if RuleReconciler is configured
 	var ruleHash string
@@ -1253,6 +1288,12 @@ func (r *ClusterReconciler) reconcileMasterWithCertHash(ctx context.Context, clu
 	}
 	// Set cluster reference for monitoring sidecar
 	stsBuilder.WithCluster(cluster)
+	// Set termination grace period (default + user override)
+	legacyMasterTerminationGracePeriod := constants.DefaultManagerTerminationGracePeriod
+	if cluster.Spec.Manager != nil && cluster.Spec.Manager.Master.TerminationGracePeriodSeconds != nil {
+		legacyMasterTerminationGracePeriod = *cluster.Spec.Manager.Master.TerminationGracePeriodSeconds
+	}
+	stsBuilder.WithTerminationGracePeriodSeconds(&legacyMasterTerminationGracePeriod)
 
 	specHash, err := patch.ComputeManagerMasterSpecHashFull(patch.ManagerMasterSpecInput{
 		Version:           cluster.Spec.Version,
@@ -1533,6 +1574,12 @@ func (r *ClusterReconciler) reconcileWorkersWithCertHash(ctx context.Context, cl
 	if configHash != "" {
 		stsBuilder.WithConfigHash(configHash)
 	}
+	// Set termination grace period (default + user override)
+	legacyWorkerTerminationGracePeriod := constants.DefaultManagerTerminationGracePeriod
+	if cluster.Spec.Manager != nil && cluster.Spec.Manager.Workers.TerminationGracePeriodSeconds != nil {
+		legacyWorkerTerminationGracePeriod = *cluster.Spec.Manager.Workers.TerminationGracePeriodSeconds
+	}
+	stsBuilder.WithTerminationGracePeriodSeconds(&legacyWorkerTerminationGracePeriod)
 
 	specHash, err := patch.ComputeManagerWorkersSpecHashFull(patch.ManagerWorkersSpecInput{
 		Replicas:          workerReplicas2,
@@ -1768,17 +1815,17 @@ func (r *ClusterReconciler) updateStatefulSetWithRetry(ctx context.Context, desi
 }
 
 // getStatefulSetPhase returns the phase of a StatefulSet
-func getStatefulSetPhase(sts *appsv1.StatefulSet) string {
+func getStatefulSetPhase(sts *appsv1.StatefulSet) wazuhv1.ComponentStatusPhase {
 	if sts.Status.ReadyReplicas == 0 {
-		return "Starting"
+		return wazuhv1.ComponentStatusPhaseStarting
 	}
 	if sts.Status.ReadyReplicas < sts.Status.Replicas {
-		return "Degraded"
+		return wazuhv1.ComponentStatusPhaseDegraded
 	}
 	if sts.Status.UpdatedReplicas < sts.Status.Replicas {
-		return "Updating"
+		return wazuhv1.ComponentStatusPhaseScaling
 	}
-	return "Ready"
+	return wazuhv1.ComponentStatusPhaseReady
 }
 
 // resolveSecretKey reads a key from a secret
@@ -1876,7 +1923,10 @@ func (r *ClusterReconciler) ensureAPICredentialsSecret(ctx context.Context, clus
 	if errors.IsNotFound(err) {
 		// Create API credentials secret with generated password
 		// Password is generated with special characters required by Wazuh API
-		generatedPassword := utils.GenerateWazuhAPIPassword(20)
+		generatedPassword, err := utils.GenerateWazuhAPIPassword(20)
+		if err != nil {
+			return fmt.Errorf("failed to generate Wazuh API password: %w", err)
+		}
 		apiCredentialsBuilder := secrets.NewAPICredentialsSecretBuilder(cluster.Name, cluster.Namespace)
 		apiCredentialsBuilder.WithCredentials(constants.DefaultWazuhAPIUsername, generatedPassword)
 		if cluster.Spec.Version != "" {

@@ -50,6 +50,11 @@ type WazuhMasterSpec struct {
 	// +kubebuilder:pruning:PreserveUnknownFields
 	Affinity *corev1.Affinity `json:"affinity,omitempty"`
 
+	// Topology spread constraints for pod scheduling
+	// +optional
+	// +kubebuilder:pruning:PreserveUnknownFields
+	TopologySpreadConstraints []corev1.TopologySpreadConstraint `json:"topologySpreadConstraints,omitempty"`
+
 	// Additional volumes
 	// +optional
 	// +kubebuilder:pruning:PreserveUnknownFields
@@ -99,6 +104,12 @@ type WazuhMasterSpec struct {
 	// Annotations for the StatefulSet
 	// +optional
 	Annotations map[string]string `json:"annotations,omitempty"`
+
+	// Termination grace period in seconds for pods
+	// Wazuh manager needs time to flush and stop services before shutdown
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	TerminationGracePeriodSeconds *int64 `json:"terminationGracePeriodSeconds,omitempty"`
 }
 
 // WazuhWorkerSpec defines the worker nodes configuration
@@ -135,6 +146,11 @@ type WazuhWorkerSpec struct {
 	// +optional
 	// +kubebuilder:pruning:PreserveUnknownFields
 	Affinity *corev1.Affinity `json:"affinity,omitempty"`
+
+	// Topology spread constraints for pod scheduling
+	// +optional
+	// +kubebuilder:pruning:PreserveUnknownFields
+	TopologySpreadConstraints []corev1.TopologySpreadConstraint `json:"topologySpreadConstraints,omitempty"`
 
 	// Pod Disruption Budget
 	// +optional
@@ -198,6 +214,12 @@ type WazuhWorkerSpec struct {
 	// HorizontalPodAutoscaler configuration for automatic scaling of workers
 	// +optional
 	HPA *HPASpec `json:"hpa,omitempty"`
+
+	// Termination grace period in seconds for pods
+	// Wazuh manager needs time to flush and stop services before shutdown
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	TerminationGracePeriodSeconds *int64 `json:"terminationGracePeriodSeconds,omitempty"`
 }
 
 // GetReplicas returns the number of worker replicas, defaulting to DefaultManagerWorkerReplicas if not set
@@ -253,7 +275,8 @@ type ServiceSpec struct {
 	// +optional
 	Annotations map[string]string `json:"annotations,omitempty"`
 
-	// LoadBalancer IP for LoadBalancer services
+	// Deprecated: LoadBalancerIP is deprecated in Kubernetes 1.24+.
+	// Use service annotations for your cloud provider instead.
 	// +optional
 	LoadBalancerIP string `json:"loadBalancerIP,omitempty"`
 
@@ -464,9 +487,9 @@ type PodDisruptionBudgetSpec struct {
 // AntiAffinitySpec defines pod anti-affinity configuration for spreading pods across topology domains
 type AntiAffinitySpec struct {
 	// Enabled enables pod anti-affinity for spreading pods across topology domains
-	// When false (default), no anti-affinity rules are added to pods
+	// When true (default), anti-affinity rules are added to spread pods across topology domains
 	// +optional
-	// +kubebuilder:default=false
+	// +kubebuilder:default=true
 	Enabled bool `json:"enabled,omitempty"`
 
 	// TopologyKey is the key for node labels used to define topology domains
@@ -481,7 +504,7 @@ type AntiAffinitySpec struct {
 	// "preferred": Scheduler PREFERS different topology domains but can co-locate if necessary
 	// +optional
 	// +kubebuilder:validation:Enum=required;preferred
-	// +kubebuilder:default="required"
+	// +kubebuilder:default="preferred"
 	Type string `json:"type,omitempty"`
 
 	// Weight is the weight (1-100) for preferred anti-affinity rules
@@ -1129,3 +1152,117 @@ type HPAScalingRules struct {
 	// +kubebuilder:validation:Enum=Max;Min;Disabled
 	SelectPolicy *string `json:"selectPolicy,omitempty"`
 }
+
+// ============================================================================
+// Phase Types
+// ============================================================================
+
+// OpenSearchResourcePhase represents the phase of a generic OpenSearch resource
+// Used by: User, Role, RoleMapping, Tenant, ActionGroup, Index, IndexTemplate,
+// ComponentTemplate, SnapshotPolicy, ISMPolicy, AuthConfig
+// +kubebuilder:validation:Enum=Pending;Ready;Failed
+type OpenSearchResourcePhase string
+
+const (
+	OpenSearchResourcePhasePending OpenSearchResourcePhase = "Pending"
+	OpenSearchResourcePhaseReady   OpenSearchResourcePhase = "Ready"
+	OpenSearchResourcePhaseFailed  OpenSearchResourcePhase = "Failed"
+)
+
+// SnapshotPhase represents the phase of an OpenSearch snapshot
+// +kubebuilder:validation:Enum=Pending;InProgress;Completed;Failed;Partial
+type SnapshotPhase string
+
+const (
+	SnapshotPhasePending    SnapshotPhase = "Pending"
+	SnapshotPhaseInProgress SnapshotPhase = "InProgress"
+	SnapshotPhaseCompleted  SnapshotPhase = "Completed"
+	SnapshotPhaseFailed     SnapshotPhase = "Failed"
+	SnapshotPhasePartial    SnapshotPhase = "Partial"
+)
+
+// OpenSearchRestorePhase represents the phase of an OpenSearch restore operation
+// +kubebuilder:validation:Enum=Pending;Validating;InProgress;Completed;Failed
+type OpenSearchRestorePhase string
+
+const (
+	OpenSearchRestorePhasePending    OpenSearchRestorePhase = "Pending"
+	OpenSearchRestorePhaseValidating OpenSearchRestorePhase = "Validating"
+	OpenSearchRestorePhaseInProgress OpenSearchRestorePhase = "InProgress"
+	OpenSearchRestorePhaseCompleted  OpenSearchRestorePhase = "Completed"
+	OpenSearchRestorePhaseFailed     OpenSearchRestorePhase = "Failed"
+)
+
+// RepositoryPhase represents the phase of a snapshot repository
+// +kubebuilder:validation:Enum=Pending;Creating;Verifying;Ready;Failed;Deleting
+type RepositoryPhase string
+
+const (
+	RepositoryPhasePending   RepositoryPhase = "Pending"
+	RepositoryPhaseCreating  RepositoryPhase = "Creating"
+	RepositoryPhaseVerifying RepositoryPhase = "Verifying"
+	RepositoryPhaseReady     RepositoryPhase = "Ready"
+	RepositoryPhaseFailed    RepositoryPhase = "Failed"
+	RepositoryPhaseDeleting  RepositoryPhase = "Deleting"
+)
+
+// BackupPhase represents the phase of a Wazuh backup
+// +kubebuilder:validation:Enum=Pending;Active;Suspended;Failed
+type BackupPhase string
+
+const (
+	BackupPhasePending   BackupPhase = "Pending"
+	BackupPhaseActive    BackupPhase = "Active"
+	BackupPhaseSuspended BackupPhase = "Suspended"
+	BackupPhaseFailed    BackupPhase = "Failed"
+)
+
+// WazuhRestorePhase represents the phase of a Wazuh restore operation
+// +kubebuilder:validation:Enum=Pending;Validating;Stopping;BackingUp;Restoring;Starting;Completed;Failed
+type WazuhRestorePhase string
+
+const (
+	WazuhRestorePhasePending    WazuhRestorePhase = "Pending"
+	WazuhRestorePhaseValidating WazuhRestorePhase = "Validating"
+	WazuhRestorePhaseStopping   WazuhRestorePhase = "Stopping"
+	WazuhRestorePhaseBackingUp  WazuhRestorePhase = "BackingUp"
+	WazuhRestorePhaseRestoring  WazuhRestorePhase = "Restoring"
+	WazuhRestorePhaseStarting   WazuhRestorePhase = "Starting"
+	WazuhRestorePhaseCompleted  WazuhRestorePhase = "Completed"
+	WazuhRestorePhaseFailed     WazuhRestorePhase = "Failed"
+)
+
+// NodePoolPhase represents the phase of an indexer node pool
+// +kubebuilder:validation:Enum=Pending;Creating;Running;Scaling;Draining;Failed
+type NodePoolPhase string
+
+const (
+	NodePoolPhasePending  NodePoolPhase = "Pending"
+	NodePoolPhaseCreating NodePoolPhase = "Creating"
+	NodePoolPhaseRunning  NodePoolPhase = "Running"
+	NodePoolPhaseScaling  NodePoolPhase = "Scaling"
+	NodePoolPhaseDraining NodePoolPhase = "Draining"
+	NodePoolPhaseFailed   NodePoolPhase = "Failed"
+)
+
+// ExpansionPhase represents the phase of a volume expansion operation
+// +kubebuilder:validation:Enum=Pending;InProgress;Completed;Failed
+type ExpansionPhase string
+
+const (
+	ExpansionPhasePending    ExpansionPhase = "Pending"
+	ExpansionPhaseInProgress ExpansionPhase = "InProgress"
+	ExpansionPhaseCompleted  ExpansionPhase = "Completed"
+	ExpansionPhaseFailed     ExpansionPhase = "Failed"
+)
+
+// ComponentStatusPhase represents the phase of a component status
+// +kubebuilder:validation:Enum=Starting;Ready;Scaling;Degraded
+type ComponentStatusPhase string
+
+const (
+	ComponentStatusPhaseStarting ComponentStatusPhase = "Starting"
+	ComponentStatusPhaseReady    ComponentStatusPhase = "Ready"
+	ComponentStatusPhaseScaling  ComponentStatusPhase = "Scaling"
+	ComponentStatusPhaseDegraded ComponentStatusPhase = "Degraded"
+)

@@ -62,12 +62,12 @@ func (r *AuthConfigReconciler) Reconcile(ctx context.Context, authConfig *wazuhv
 	// Resolve secrets
 	secrets, err := r.resolveSecrets(ctx, authConfig)
 	if err != nil {
-		return r.updateStatus(ctx, authConfig, "Failed", fmt.Sprintf("Failed to resolve secrets: %v", err))
+		return r.updateStatus(ctx, authConfig, wazuhv1.OpenSearchResourcePhaseFailed, fmt.Sprintf("Failed to resolve secrets: %v", err))
 	}
 
 	// Validate configuration
 	if err := r.validateConfig(authConfig, secrets); err != nil {
-		return r.updateStatus(ctx, authConfig, "Failed", fmt.Sprintf("Validation failed: %v", err))
+		return r.updateStatus(ctx, authConfig, wazuhv1.OpenSearchResourcePhaseFailed, fmt.Sprintf("Validation failed: %v", err))
 	}
 
 	// Get the referenced cluster name for ConfigMap naming
@@ -76,7 +76,7 @@ func (r *AuthConfigReconciler) Reconcile(ctx context.Context, authConfig *wazuhv
 
 	// Reconcile indexer security config
 	if err := r.reconcileIndexerSecurityConfig(ctx, authConfig, clusterName, namespace, secrets); err != nil {
-		return r.updateStatus(ctx, authConfig, "Failed", fmt.Sprintf("Failed to reconcile indexer config: %v", err))
+		return r.updateStatus(ctx, authConfig, wazuhv1.OpenSearchResourcePhaseFailed, fmt.Sprintf("Failed to reconcile indexer config: %v", err))
 	}
 
 	// Apply security config via securityadmin.sh (non-fatal if exec fails)
@@ -90,14 +90,14 @@ func (r *AuthConfigReconciler) Reconcile(ctx context.Context, authConfig *wazuhv
 
 	// Reconcile dashboard config
 	if err := r.reconcileDashboardConfig(ctx, authConfig, clusterName, namespace, secrets); err != nil {
-		return r.updateStatus(ctx, authConfig, "Failed", fmt.Sprintf("Failed to reconcile dashboard config: %v", err))
+		return r.updateStatus(ctx, authConfig, wazuhv1.OpenSearchResourcePhaseFailed, fmt.Sprintf("Failed to reconcile dashboard config: %v", err))
 	}
 
 	log.Info("Auth config reconciliation completed",
 		"name", authConfig.Name,
 		"activeAuthDomains", r.getActiveAuthDomains(authConfig))
 
-	return r.updateStatus(ctx, authConfig, "Ready", "Authentication configuration applied")
+	return r.updateStatus(ctx, authConfig, wazuhv1.OpenSearchResourcePhaseReady, "Authentication configuration applied")
 }
 
 // resolveSecrets resolves all secret references in the auth config
@@ -285,7 +285,10 @@ func (r *AuthConfigReconciler) reconcileDashboardConfig(
 	for key, value := range secrets {
 		builder.WithSecret(key, value)
 	}
-	authSection := builder.BuildAuthSection()
+	authSection, err := builder.BuildAuthSection()
+	if err != nil {
+		return fmt.Errorf("failed to build auth section: %w", err)
+	}
 
 	// Create ConfigMap for dashboard auth config
 	configMapName := constants.DashboardAuthConfigName(clusterName)
@@ -307,7 +310,7 @@ func (r *AuthConfigReconciler) reconcileDashboardConfig(
 
 	// Check if ConfigMap exists
 	existing := &corev1.ConfigMap{}
-	err := r.Get(ctx, types.NamespacedName{Name: configMapName, Namespace: namespace}, existing)
+	err = r.Get(ctx, types.NamespacedName{Name: configMapName, Namespace: namespace}, existing)
 	if err != nil {
 		if client.IgnoreNotFound(err) != nil {
 			return err
@@ -350,7 +353,7 @@ func (r *AuthConfigReconciler) getActiveAuthDomains(authConfig *wazuhv1.OpenSear
 }
 
 // updateStatus updates the status of the OpenSearchAuthConfig
-func (r *AuthConfigReconciler) updateStatus(ctx context.Context, authConfig *wazuhv1.OpenSearchAuthConfig, phase, message string) error {
+func (r *AuthConfigReconciler) updateStatus(ctx context.Context, authConfig *wazuhv1.OpenSearchAuthConfig, phase wazuhv1.OpenSearchResourcePhase, message string) error {
 	authConfig.Status.Phase = phase
 	authConfig.Status.Message = message
 	authConfig.Status.ObservedGeneration = authConfig.Generation

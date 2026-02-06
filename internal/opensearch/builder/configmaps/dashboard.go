@@ -110,6 +110,17 @@ func (b *DashboardConfigMapBuilder) WithResolvedCredentials(credentials map[stri
 	return b
 }
 
+// NeedsDefaultCredentials returns true if the default API endpoint password
+// has not been resolved yet (no wazuhPlugin config or no explicit credentials)
+func (b *DashboardConfigMapBuilder) NeedsDefaultCredentials() bool {
+	if b.resolvedCredentials != nil {
+		if _, ok := b.resolvedCredentials["default:password"]; ok {
+			return false
+		}
+	}
+	return true
+}
+
 // WithAuthConfig sets the authentication configuration from CRD
 // This will be used to generate SSO settings in opensearch_dashboards.yml
 func (b *DashboardConfigMapBuilder) WithAuthConfig(authConfig *wazuhv1.OpenSearchAuthConfigSpec) *DashboardConfigMapBuilder {
@@ -125,7 +136,7 @@ func (b *DashboardConfigMapBuilder) WithAuthSecrets(secrets map[string]string) *
 }
 
 // Build creates the ConfigMap for OpenSearch Dashboard
-func (b *DashboardConfigMapBuilder) Build() *corev1.ConfigMap {
+func (b *DashboardConfigMapBuilder) Build() (*corev1.ConfigMap, error) {
 	name := constants.DashboardConfigName(b.clusterName)
 
 	labels := map[string]string{
@@ -143,10 +154,10 @@ func (b *DashboardConfigMapBuilder) Build() *corev1.ConfigMap {
 	}
 
 	// Build opensearch_dashboards.yml configuration
-	dashboardConfig := b.buildDashboardConfig(indexerHost)
-
-	// Build wazuh.yml configuration
-	wazuhConfig := b.buildWazuhConfig()
+	dashboardConfig, err := b.buildDashboardConfig(indexerHost)
+	if err != nil {
+		return nil, fmt.Errorf("failed to build dashboard config: %w", err)
+	}
 
 	// Build custom wazuh_app_config.sh script
 	wazuhAppConfigScript := b.buildWazuhAppConfigScript()
@@ -159,16 +170,44 @@ func (b *DashboardConfigMapBuilder) Build() *corev1.ConfigMap {
 		},
 		Data: map[string]string{
 			"opensearch_dashboards.yml": dashboardConfig,
-			"wazuh.yml":                 wazuhConfig,
 			"wazuh_app_config.sh":       wazuhAppConfigScript,
+		},
+	}, nil
+}
+
+// BuildWazuhConfigSecret creates a Secret containing wazuh.yml.
+// This is kept in a Secret (not a ConfigMap) because wazuh.yml contains
+// Wazuh API credentials and Secrets are encrypted at rest when etcd
+// encryption is enabled.
+func (b *DashboardConfigMapBuilder) BuildWazuhConfigSecret() *corev1.Secret {
+	name := constants.DashboardWazuhConfigSecretName(b.clusterName)
+
+	labels := map[string]string{
+		constants.LabelName:      constants.AppName + "-" + constants.ComponentDashboard,
+		constants.LabelInstance:  b.clusterName,
+		constants.LabelComponent: constants.ComponentDashboard,
+		constants.LabelPartOf:    constants.AppName,
+		constants.LabelManagedBy: constants.OperatorName,
+	}
+
+	wazuhConfig := b.buildWazuhConfig()
+
+	return &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: b.namespace,
+			Labels:    labels,
+		},
+		StringData: map[string]string{
+			"wazuh.yml": wazuhConfig,
 		},
 	}
 }
 
 // buildDashboardConfig generates the opensearch_dashboards.yml content
-func (b *DashboardConfigMapBuilder) buildDashboardConfig(indexerHost string) string {
+func (b *DashboardConfigMapBuilder) buildDashboardConfig(indexerHost string) (string, error) {
 	if b.customConfig != "" {
-		return b.customConfig
+		return b.customConfig, nil
 	}
 
 	baseConfig := fmt.Sprintf(`# OpenSearch Dashboards configuration
@@ -205,16 +244,20 @@ opensearch.password: "${INDEXER_PASSWORD}"
 
 `, b.serverHost, b.serverPort, b.clusterName, indexerHost, b.indexerPort)
 
-	return baseConfig + b.buildAuthSection()
+	authSection, err := b.buildAuthSection()
+	if err != nil {
+		return "", err
+	}
+	return baseConfig + authSection, nil
 }
 
 // buildAuthSection generates the SSO authentication settings for opensearch_dashboards.yml
-func (b *DashboardConfigMapBuilder) buildAuthSection() string {
+func (b *DashboardConfigMapBuilder) buildAuthSection() (string, error) {
 	if b.authConfig == nil {
 		// Default to basic auth only
 		return `# Security Authentication
 opensearch_security.auth.type: "basicauth"
-`
+`, nil
 	}
 
 	builder := config.NewDashboardAuthConfigBuilder(b.authConfig)
@@ -225,9 +268,6 @@ opensearch_security.auth.type: "basicauth"
 }
 
 // buildWazuhConfig generates the wazuh.yml configuration for the Wazuh plugin
-// TODO(security): Credentials are written to ConfigMap which is not encrypted at rest by default.
-// Consider migrating wazuh.yml to a Secret or using init script with env vars from Secrets.
-// See: https://kubernetes.io/docs/tasks/administer-cluster/encrypt-data/
 func (b *DashboardConfigMapBuilder) buildWazuhConfig() string {
 	var sb strings.Builder
 
