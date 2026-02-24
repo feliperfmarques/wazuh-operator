@@ -423,7 +423,7 @@ flowchart TD
 
 ```mermaid
 graph TD
-    subgraph NS["Kubernetes Cluster (wazuh-system namespace)"]
+    subgraph NS["Kubernetes Cluster (wazuh-operator namespace)"]
         DEP["Deployment: wazuh-operator<br/>1 replica (leader election for HA)<br/>Watches CRs cluster-wide<br/>Metrics endpoint :8443 · Health probes :8081"]
         CR["ClusterRole: wazuh-operator-role<br/>Permissions for all CRs and K8s resources"]
         SA["ServiceAccount: wazuh-operator"]
@@ -538,8 +538,29 @@ graph TD
 
 ### Health Checks
 
-- `/healthz`: Liveness probe
-- `/readyz`: Readiness probe
+The operator exposes health endpoints on port `8081` (configurable via `operator.healthProbe.port`).
+
+**Liveness** (`/healthz`):
+
+| Check | Description |
+|-------|-------------|
+| `ping` | Always passes if the process is running |
+
+**Readiness** (`/readyz`):
+
+| Check | Description |
+|-------|-------------|
+| `ping` | Always passes if the process is running |
+| `informer-sync` | Passes once the Kubernetes informer cache has fully synced |
+| `reconcile-watchdog` | Passes while the reconcile loop has run within the last 5 minutes |
+| `leader-election` | Passes once this instance is the elected leader (only registered when `--leader-elect` is enabled) |
+
+Use the `?verbose` query parameter to see individual check results:
+
+```bash
+kubectl port-forward -n wazuh-operator deploy/wazuh-operator-controller-manager 8081:8081
+curl http://localhost:8081/readyz?verbose
+```
 
 ## Performance Considerations
 

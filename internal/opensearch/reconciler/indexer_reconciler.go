@@ -297,9 +297,17 @@ func (r *IndexerReconciler) reconcileSecrets(ctx context.Context, cluster *wazuh
 		}
 	} else if err != nil {
 		return fmt.Errorf("failed to get indexer credentials secret: %w", err)
-	} else if adminPassword == "" {
-		// Get existing password from credentials secret (but prefer external if specified)
-		adminPassword = string(existingCreds.Data[constants.SecretKeyAdminPassword])
+	} else {
+		// Reuse credentials from existing secret when external credentials are not explicitly provided.
+		if cluster.Spec.Indexer == nil || cluster.Spec.Indexer.Credentials == nil || cluster.Spec.Indexer.Credentials.SecretName == "" {
+			if username, ok := existingCreds.Data[constants.SecretKeyAdminUsername]; ok && len(username) > 0 {
+				adminUsername = string(username)
+			}
+		}
+		if adminPassword == "" {
+			// Get existing password from credentials secret (but prefer external if specified)
+			adminPassword = string(existingCreds.Data[constants.SecretKeyAdminPassword])
+		}
 	}
 
 	// Security config secret with default configurations
@@ -323,7 +331,7 @@ func (r *IndexerReconciler) reconcileSecrets(ctx context.Context, cluster *wazuh
 
 		securityBuilder := secrets.NewIndexerSecuritySecretBuilder(cluster.Name, cluster.Namespace)
 		// Add default security configuration files with the SAME password as credentials
-		securityBuilder.WithInternalUsers(generateDefaultInternalUsers(adminPassword))
+		securityBuilder.WithInternalUsers(generateDefaultInternalUsers(adminUsername, adminPassword))
 		securityBuilder.WithRoles(generateDefaultRoles())
 		securityBuilder.WithRolesMapping(generateDefaultRolesMapping(adminDN))
 		securityBuilder.WithActionGroups(generateDefaultActionGroups())
@@ -1707,15 +1715,18 @@ func (r *IndexerReconciler) createOrUpdate(ctx context.Context, obj client.Objec
 	})
 }
 
-// updateStatefulSetWithRetry updates a StatefulSet with retry-on-conflict, always using the latest resourceVersion.
+// updateStatefulSetWithRetry updates a StatefulSet with retry-on-conflict.
+// It merges mutable fields from desired into the current server object rather than
+// doing a full PUT replacement, which avoids issues with server-defaulted immutable
+// fields (e.g. VolumeClaimTemplates) causing silent update failures.
 func (r *IndexerReconciler) updateStatefulSetWithRetry(ctx context.Context, desired *appsv1.StatefulSet) error {
 	return utils.RetryOnConflict(ctx, func() error {
 		current := &appsv1.StatefulSet{}
 		if err := r.Get(ctx, types.NamespacedName{Name: desired.Name, Namespace: desired.Namespace}, current); err != nil {
 			return err
 		}
-		desired.SetResourceVersion(current.GetResourceVersion())
-		return r.Update(ctx, desired)
+		patch.MergeStatefulSetUpdate(current, desired)
+		return r.Update(ctx, current)
 	})
 }
 
@@ -1943,7 +1954,11 @@ func (r *IndexerReconciler) generateStandaloneIndexerCertificates(ctx context.Co
 }
 
 // generateDefaultInternalUsers generates the internal_users.yml content with bcrypt hashed password
-func generateDefaultInternalUsers(adminPassword string) []byte {
+func generateDefaultInternalUsers(adminUsername, adminPassword string) []byte {
+	if adminUsername == "" {
+		adminUsername = constants.DefaultOpenSearchAdminUsername
+	}
+
 	// Generate bcrypt hash for the admin password (cost 12 for security)
 	// bcrypt.GenerateFromPassword should never fail with valid string input
 	passwordHash, err := bcrypt.GenerateFromPassword([]byte(adminPassword), 12)
@@ -1959,18 +1974,18 @@ _meta:
   type: "internalusers"
   config_version: 2
 
-admin:
+%s:
   hash: "%s"
   reserved: true
   backend_roles:
     - "admin"
-  description: "Admin user"
+  description: "Default admin user"
 
 kibanaserver:
   hash: "%s"
   reserved: true
   description: "Kibana server user"
-`, string(passwordHash), string(passwordHash)))
+`, adminUsername, string(passwordHash), string(passwordHash)))
 }
 
 // generateDefaultRoles generates the roles.yml content
@@ -2113,7 +2128,11 @@ func (r *IndexerReconciler) reconcileSecurityInitJob(ctx context.Context, cluste
 		return fmt.Errorf("failed to get credentials secret: %w", err)
 	}
 
-	// Get the password from secret
+	// Get credentials from secret
+	adminUsername := string(credSecret.Data[constants.SecretKeyAdminUsername])
+	if adminUsername == "" {
+		adminUsername = constants.DefaultOpenSearchAdminUsername
+	}
 	password := string(credSecret.Data[constants.SecretKeyAdminPassword])
 	if password == "" {
 		log.V(1).Info("Admin password not found in credentials secret")
@@ -2152,16 +2171,16 @@ func (r *IndexerReconciler) reconcileSecurityInitJob(ctx context.Context, cluste
 		return nil
 	}
 
-	// Update admin user
-	log.Info("Syncing admin user to security index")
+	// Update default admin user
+	log.Info("Syncing default admin user to security index", "username", adminUsername)
 	adminPayload := map[string]interface{}{
 		"password":      password,
 		"backend_roles": []string{"admin"},
-		"description":   "Admin user",
+		"description":   "Default admin user",
 	}
-	resp, err := osClient.PutJSON(ctx, "/_plugins/_security/api/internalusers/admin", adminPayload)
+	resp, err := osClient.PutJSON(ctx, "/_plugins/_security/api/internalusers/"+adminUsername, adminPayload)
 	if err != nil {
-		log.V(1).Info("Failed to update admin user (may be expected on new cluster)", "error", err)
+		log.V(1).Info("Failed to update default admin user (may be expected on new cluster)", "username", adminUsername, "error", err)
 		return nil
 	}
 	resp.Body.Close()
