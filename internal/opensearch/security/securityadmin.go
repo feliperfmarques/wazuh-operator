@@ -150,6 +150,9 @@ func buildInternalUsersCommand(wazuhVersion string) []string {
 	preferredInternalUsers := preferredConfigDir + "/internal_users.yml"
 	fallbackInternalUsers := fallbackConfigDir + "/internal_users.yml"
 
+	// The CA cert is in the indexer certs volume which is mounted at a version-aware path.
+	certsDir := constants.IndexerCertsDir(wazuhVersion)
+
 	return []string{
 		"bash", "-c",
 		fmt.Sprintf("INTERNAL_USERS_FILE=%s; "+
@@ -168,7 +171,7 @@ func buildInternalUsersCommand(wazuhVersion string) []string {
 			"-key %s/tls.key",
 			preferredInternalUsers, fallbackInternalUsers, fallbackInternalUsers,
 			preferredInternalUsers, fallbackInternalUsers,
-			constants.PathIndexerCerts, constants.PathIndexerAdminCerts, constants.PathIndexerAdminCerts),
+			certsDir, constants.PathIndexerAdminCerts, constants.PathIndexerAdminCerts),
 	}
 }
 

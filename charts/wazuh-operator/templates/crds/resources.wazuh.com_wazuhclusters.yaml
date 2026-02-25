@@ -38680,6 +38680,12 @@ spec:
                     description: LastSyncTime is when CRDs were last synced
                     format: date-time
                     type: string
+                  securityConfigHash:
+                    description: |-
+                      SecurityConfigHash is the hash of the inputs (username, password, adminDN)
+                      used to generate the indexer security secret. Prevents unnecessary bcrypt
+                      re-generation and security secret updates on every reconciliation loop.
+                    type: string
                   syncedActionGroups:
                     description: SyncedActionGroups count of synced action group CRDs
                     type: integer

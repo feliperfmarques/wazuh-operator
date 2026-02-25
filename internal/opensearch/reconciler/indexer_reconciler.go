@@ -310,8 +310,8 @@ func (r *IndexerReconciler) reconcileSecrets(ctx context.Context, cluster *wazuh
 		}
 	}
 
-	// Security config secret with default configurations
-	// Uses the same password as credentials secret and is reconciled on every loop.
+	// Security config secret with default configurations.
+	// Derive the admin DN for roles_mapping.
 	adminDN := certificates.DefaultAdminDN()
 	if cluster.Spec.TLS != nil && cluster.Spec.TLS.CertConfig != nil {
 		cfg := cluster.Spec.TLS.CertConfig
@@ -329,6 +329,31 @@ func (r *IndexerReconciler) reconcileSecrets(ctx context.Context, cluster *wazuh
 		adminDN = certificates.AdminDN(*optsFromCert)
 	}
 
+	// Compute a deterministic hash of the security config inputs (username, password, adminDN).
+	// bcrypt generates a different hash every call, so we must avoid rebuilding the secret
+	// unless the actual inputs changed — otherwise the secret changes every loop and triggers
+	// a hot reconciliation loop with securityadmin.sh running continuously.
+	securityInputHash := patch.ComputeConfigHash(map[string]string{
+		"adminUsername": adminUsername,
+		"adminPassword": adminPassword,
+		"adminDN":       adminDN,
+	})
+
+	securitySecretName := fmt.Sprintf("%s-indexer-security", cluster.Name)
+	securitySecretExists := &corev1.Secret{}
+	securitySecretFound := true
+	if err := r.Get(ctx, types.NamespacedName{Name: securitySecretName, Namespace: cluster.Namespace}, securitySecretExists); err != nil {
+		if !errors.IsNotFound(err) {
+			return fmt.Errorf("failed to get indexer security secret: %w", err)
+		}
+		securitySecretFound = false
+	}
+
+	// Skip rebuild if the secret already exists and inputs haven't changed.
+	if securitySecretFound && cluster.Status.Security != nil && cluster.Status.Security.SecurityConfigHash == securityInputHash {
+		return nil
+	}
+
 	securityBuilder := secrets.NewIndexerSecuritySecretBuilder(cluster.Name, cluster.Namespace)
 	securityBuilder.WithInternalUsers(generateDefaultInternalUsers(adminUsername, adminPassword))
 	securityBuilder.WithRoles(generateDefaultRoles())
@@ -344,6 +369,13 @@ func (r *IndexerReconciler) reconcileSecrets(ctx context.Context, cluster *wazuh
 	if err := r.createOrUpdate(ctx, securitySecret); err != nil {
 		return fmt.Errorf("failed to reconcile indexer security secret: %w", err)
 	}
+
+	// Persist the input hash so we skip this on next reconciliation.
+	if cluster.Status.Security == nil {
+		cluster.Status.Security = &wazuhv1.SecurityStatus{}
+	}
+	cluster.Status.Security.SecurityConfigHash = securityInputHash
+	log.Info("Reconciled indexer security secret", "inputHash", securityInputHash)
 
 	return nil
 }
@@ -2184,6 +2216,15 @@ func (r *IndexerReconciler) reconcileSecurityInitJob(ctx context.Context, cluste
 		return nil
 	}
 	log.Info("Credentials pushed via securityadmin.sh", "username", adminUsername)
+	if r.Recorder != nil {
+		r.Recorder.Event(cluster, corev1.EventTypeNormal, "SecurityCredentialsRecovered",
+			"Credentials pushed via securityadmin.sh after credentials hash change")
+	}
+
+	// Restart the dashboard to break out of CrashLoopBackOff.
+	// The dashboard already has the correct password from the secret, but may be stuck
+	// in exponential backoff after repeated auth failures against the indexer.
+	r.restartDashboard(ctx, cluster)
 
 	// Update status to track that we've synced this config
 	if cluster.Status.Security == nil {

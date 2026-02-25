@@ -1154,6 +1154,12 @@ type SecurityStatus struct {
 	// Used to detect when credentials change and need to be re-synced to OpenSearch
 	// +optional
 	CredentialsHash string `json:"credentialsHash,omitempty"`
+
+	// SecurityConfigHash is the hash of the inputs (username, password, adminDN)
+	// used to generate the indexer security secret. Prevents unnecessary bcrypt
+	// re-generation and security secret updates on every reconciliation loop.
+	// +optional
+	SecurityConfigHash string `json:"securityConfigHash,omitempty"`
 }
 
 // ClusterPhase represents the phase of the cluster
